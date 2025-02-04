@@ -19,10 +19,12 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="frameTrans.cpp" />
     <ClCompile Include="Soft_gripper.cpp" />
     <ClCompile Include="SerialPort.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="frameTrans.hpp" />
     <ClInclude Include="SerialPort.hpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
