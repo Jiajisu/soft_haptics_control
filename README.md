@@ -2,7 +2,6 @@
 
  This project demonstrates how to integrate Polhemus Viper tracking data into a CHAI3D scene and interact with soft haptic gripper. It includes:
 
- 
 1.
 
 2.
@@ -15,7 +14,6 @@
 
  Key Files:
 
- 
 1.soft_gripper.cpp: Contains the CHAI3D setup, rendering loop, and Polhemus data handling.
 
 2.SerialPort.cpp/.hpp: Communicates with Arduino (if needed).
@@ -27,10 +25,10 @@
 5.
 
  How It Works:
+ 
 1.Initialize the Polhemus device and CHAI3D world.
 
 2.
-
 
 Building & Running
 
