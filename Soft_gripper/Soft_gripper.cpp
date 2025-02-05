@@ -90,6 +90,7 @@ bool mirroredDisplay = false;
 
 //------------------------------------------------------------------------------
 // HAPTIC INVERSE KINEMATIC CLASS
+//------------------------------------------------------------------------------
 cVector3d test_pressure{ 0,0,0 };
 class MatlabCalc
 {
@@ -475,6 +476,10 @@ typedef struct _MYPNO {
 
 vpFrameInfo f;	///frame structs
 CFrameRateCfg g_cfrate;
+// 用于记录“在按下 boresightSensor1() 时，传感器1的当前位置”
+// 后续循环把该值作为 offset，令后续 pos - g_posOffset => 位置归零
+cVector3d g_posOffset(0.0, 0.0, 0.0);
+
 /****************************************************************************
 Function Identifier
  ****************************************************************************/
@@ -484,6 +489,8 @@ void DisplaySEUs();
 void DisplayError(int32_t err, const char* szMsg);
 bool StartCont();
 bool StopCont();
+bool boresightSensor1();
+bool clearBoresightSensor1();
 PNODATA GrabFramePNO(MYPNOTYPE* pv, uint32_t s_index);
 //PNODATA convertToSensor1Frame(const PNODATA& sensor1, const PNODATA& sensor2);
 /****************************************************************************
@@ -524,6 +531,9 @@ int main(int argc, char* argv[])
 	cout << "[f] - Enable/Disable full screen mode" << endl;
 	cout << "[m] - Enable/Disable vertical mirroring" << endl;
 	cout << "[q] - Exit application" << endl;
+	cout << "[b] - Boresight sensor1 (0,0,0)+(0,0,0,1)" << endl;
+	cout << "[r] - Clear boresight for sensor1 " << endl;
+
 	cout << endl << endl;
 
 
@@ -617,8 +627,8 @@ int main(int argc, char* argv[])
 	world->addChild(camera);
 
 	// position and orient the camera
-	camera->set(cVector3d(1, -0.3, 0.5),    // camera position (eye)
-		cVector3d(0.0, 0.0, 0.0),    // lookat position (target)
+	camera->set(cVector3d(2, 0, 1.5),    // camera position (eye)
+		cVector3d(0.0, 0.0, 0.5),    // lookat position (target)
 		cVector3d(0.0, 0.0, 1.0));   // direction of the (up) vector
 
 	// set the near and far clipping planes of the camera
@@ -645,7 +655,7 @@ int main(int argc, char* argv[])
 	light->setEnabled(true);
 
 	// position the light source
-	light->setLocalPos(0.6, 0.6, 0.5);
+	light->setLocalPos(2, 0, 1.5);
 
 	// define the direction of the light beam
 	light->setDir(-0.5, -0.5, -0.5);
@@ -658,7 +668,7 @@ int main(int argc, char* argv[])
 	light->m_shadowMap->setQualityMedium();
 
 	// set light cone half angle
-	light->setCutOffAngleDeg(30);
+	light->setCutOffAngleDeg(60);
 
 
 	//--------------------------------------------------------------------------
@@ -1030,15 +1040,17 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 		mirroredDisplay = !mirroredDisplay;
 		camera->setMirrorVertical(mirroredDisplay);
 	}
-	// arduino LED toggler
-	else if (a_key == GLFW_KEY_A)
+	//Press R for turn off boresight (just read raw data) 
+	else if (a_key == GLFW_KEY_R)
 	{
-		arduinoWriteData(50, "ON");
+		clearBoresightSensor1();
 
 	}
+	//Press B for boresight the sensor 1 to (0,0,0) (0,0,0,1)
 	else if (a_key == GLFW_KEY_B)
 	{
-		arduinoWriteData(50, "OFF");
+		// call boresight sensor1
+		boresightSensor1();
 	}
 	else if (a_key == GLFW_KEY_I)
 	{
@@ -1174,6 +1186,20 @@ void updateHaptics(void)
 
 	cylinderTop->m_material->setRed();
 
+	double relRadius = 0.05;
+	double relHeight = 0.05;
+	cShapeCylinder* cylinderTopRel = new cShapeCylinder(relRadius, relRadius, relHeight);
+	world->addChild(cylinderTopRel);
+
+	// 给它一个不同的颜色
+	cylinderTopRel->m_material->setGreenForest();
+
+	// 让它在 3D 场景里“靠左侧”一点, 以免与主场景重叠
+	// (可在后面动态再加偏移)
+	cylinderTopRel->setLocalPos(-0.5, 0.0, 0.0); // 先往 X 方向左移
+
+
+
 	// simulation in now running
 	simulationRunning = true;
 	simulationFinished = false;
@@ -1196,54 +1222,70 @@ void updateHaptics(void)
 		PNODATA pno_2;
 		PNODATA pno2_in_sensor1_frame;
 		vpctx_dev_lastpnof(g_ctx, g_hnd, f);
-		// transfer unit from CM to MM
+	
+		// 假设 updateHaptics() 或类似循环中：
 		if ((MYPNOTYPE*)&(f.pF)[0])
 		{
+			// a) Sensor1 (cylinderBot)，使用 boresight 后姿态、软件 offset 后位置
 			pno_1 = GrabFramePNO((MYPNOTYPE*)&(f.pF)[0], 0);
+			double scale = 0.1; // cm->m
+			cVector3d curPos1(
+				pno_1.pos[0] * scale,
+				pno_1.pos[1] * scale,
+				pno_1.pos[2] * scale
+			);
+			cVector3d relPos1 = curPos1 - g_posOffset; // 让 boresight 那刻作为0
+			cQuaternion q1(pno_1.ori[0], pno_1.ori[1], pno_1.ori[2], pno_1.ori[3]);
+			cMatrix3d r1 = quaternionToMatrix(q1);
+
+			cylinderBot->setLocalPos(relPos1);
+			cylinderBot->setLocalRot(r1);
+
+			// b) Sensor2 (cylinderTop)，不做 boresight，但减同一个 offset
 			pno_2 = GrabFramePNO((MYPNOTYPE*)&(f.pF)[0], 1);
-			// //transfer unit from CM to MM
-			//pno_1.pos[0] *= 10;
-			//pno_1.pos[1] *= 10;
-			//pno_1.pos[2] *= 10;
-			//pno_2.pos[0] *= 10;
-			//pno_2.pos[1] *= 10;
-			//pno_2.pos[2] *= 10; 
+			cVector3d curPos2(
+				pno_2.pos[0] * scale,
+				pno_2.pos[1] * scale,
+				pno_2.pos[2] * scale
+			);
+			cVector3d relPos2 = curPos2 - g_posOffset;
+			cQuaternion q2(pno_2.ori[0], pno_2.ori[1], pno_2.ori[2], pno_2.ori[3]);
+			cMatrix3d r2 = quaternionToMatrix(q2);
 
-			//transfer unit from CM to M
-			pno_1.pos[0] *= 0.1;
-			pno_1.pos[1] *= 0.1;
-			pno_1.pos[2] *= 0.1;
-			pno_2.pos[0] *= 0.1;
-			pno_2.pos[1] *= 0.1;
-			pno_2.pos[2] *= 0.1;
-			cout << pno_1.pos[2] << endl;
-			// get orientation
+			cylinderTop->setLocalPos(relPos2);
+			cylinderTop->setLocalRot(r2);
 
-			cQuaternion qTop(pno_1.ori[0], pno_1.ori[1], pno_1.ori[2], pno_1.ori[3]);
-			cQuaternion qBot(pno_1.ori[0], pno_1.ori[1], pno_1.ori[2], pno_1.ori[3]);
-			cMatrix3d rTop = quaternionToMatrix(qTop);
-			cMatrix3d rBot = quaternionToMatrix(qBot);
-			// set position and orientation 
+			// c) 计算 sensor2 相对于 sensor1 的相对位姿 => 显示到 cylinderTopRel
+			PNODATA pno2_in_sensor1_frame = convertToSensor1Frame(pno_1, pno_2);
 
-			cylinderTop->setLocalPos(pno_1.pos[0], pno_1.pos[1], pno_1.pos[2]);
-			cylinderBot->setLocalPos(pno_2.pos[0], pno_2.pos[1], pno_2.pos[2]);
+			// 把相对坐标(单位仍是 cm)转换到 m
+			cVector3d sensor2RelPos(
+				pno2_in_sensor1_frame.pos[0] * scale,
+				pno2_in_sensor1_frame.pos[1] * scale,
+				pno2_in_sensor1_frame.pos[2] * scale
+			);
+			cQuaternion q2_rel(
+				pno2_in_sensor1_frame.ori[0],
+				pno2_in_sensor1_frame.ori[1],
+				pno2_in_sensor1_frame.ori[2],
+				pno2_in_sensor1_frame.ori[3]
+			);
+			cMatrix3d r2_rel = quaternionToMatrix(q2_rel);
 
+			// 如果我们也希望"相对圆柱" 以"sensor1世界位置"为基准 => 
+			//   finalPosRel = sensor1世界位置 + sensor2对sensor1的局部位置
+			//   再加一个小偏移 shift(例如Y方向0.3) 让它不与 sensor2 重叠
+			cVector3d shift(0.0, 0.3, 0.0);
+			cVector3d finalPosRel = shift + sensor2RelPos;
+			//cVector3d finalPosRel(0.0, 0.3, 0.0);
 
-			cylinderTop->setLocalRot(rTop);
-			cylinderBot->setLocalRot(rBot);
+			cylinderTopRel->setLocalPos(finalPosRel);
+			cylinderTopRel->setLocalRot(r2_rel);
 
-			pno2_in_sensor1_frame = convertToSensor1Frame(pno_1, pno_2);
-
-			//cout << "pos_rel: "
-			//	<< pno2_in_sensor1_frame.pos[0] << ", "
-			//	<< pno2_in_sensor1_frame.pos[1] << ", "
-			//	<< pno2_in_sensor1_frame.pos[2] << "\r";
-			//cout << "ori_rel: "
-			//	<< pno2_in_sensor1_frame.ori[0] << ", "
-			//	<< pno2_in_sensor1_frame.ori[1] << ", "
-			//	<< pno2_in_sensor1_frame.ori[2] << ", "
-			//	<< pno2_in_sensor1_frame.ori[3] << endl;
+			// 也可以在此 debug:
+			// std::cout << "Sensor2RelPos: " << sensor2RelPos.str() << "\n";
 		}
+
 		/////////////////////////////////////////////////////////////////////////
 		// FRAME TRANS TEST
 		/////////////////////////////////////////////////////////////////////////	
@@ -1495,6 +1537,117 @@ bool StopCont()
 
 	return r == 0;
 }
+
+
+
+//------------------------------------------------------------------------------
+// A function to set boresight on sensor #0 (which you call "sensor1").
+// This makes the Polhemus hardware treat the current physical pose as "no rotation".
+//------------------------------------------------------------------------------
+bool boresightSensor1()
+{
+	// 假设 sensorID=0 即“sensor1”，若硬件配置中 sensor1 是 ID=1，则改成1
+	int sensorID = 0;
+
+	// (1) 在调用 boresight 之前，先读取一帧当前姿态(位置+四元数)
+	//     目的是获取“当前pos”以便软件端做 offset。
+	// ------------------------------------------------------------------
+	vpFrameInfo tmpFrame;
+	int ret = vpctx_dev_lastpnof(g_ctx, g_hnd, tmpFrame);
+	if (ret != 0)
+	{
+		DisplayError(ret, "vpctx_dev_lastpnof inside boresightSensor1()");
+		return false;
+	}
+
+	MYPNOTYPE* pF = (MYPNOTYPE*)&(tmpFrame.pF)[0];
+	if (!pF)
+	{
+		std::cout << "Error: Null pointer when reading Polhemus data in boresightSensor1()\n";
+		return false;
+	}
+
+	// 读取 sensorID 对应 pno
+	PNODATA pnoCur = GrabFramePNO(pF, sensorID);
+
+	// （可选）若pos_units是CM，且我们要用米，则做换算
+	//         取决于 config.pos_units
+	//         如果你之前在 updateHaptics 中也做了 *0.1，这里就同步处理
+	cVector3d pnoCurPos(
+		pnoCur.pos[0] * 0.1,
+		pnoCur.pos[1] * 0.1,
+		pnoCur.pos[2] * 0.1
+	);
+
+	// 记录到全局 offset => 让后续 "pos - g_posOffset" = 0
+	g_posOffset = pnoCurPos;
+
+	// (2) 设置硬件 boresight => 让当前姿态变为“无旋转”
+	// ------------------------------------------------------------------
+	CBoresightCfg newBore;
+	memset(&newBore, 0, sizeof(newBore));
+	newBore.Units() = (eViperOriUnits)config.ori_units;
+
+	if (config.ori_units == ORI_QUATERNION)
+	{
+		// [w, x, y, z] = [1, 0, 0, 0]
+		newBore.params[0] = 1.0f;
+		newBore.params[1] = 0.0f;
+		newBore.params[2] = 0.0f;
+		newBore.params[3] = 0.0f;
+	}
+	else
+	{
+		// 如果是 Euler 模式 => [Az,El,Roll] = [0,0,0]
+		newBore.params[0] = 0.0f;
+		newBore.params[1] = 0.0f;
+		newBore.params[2] = 0.0f;
+		newBore.params[3] = 0.0f;
+	}
+
+	// 调用 Polhemus API
+	int r = vpcmd_sns_boresight(g_ctx, g_hnd, sensorID, CMD_ACTION_SET, newBore);
+	if (r != 0)
+	{
+		DisplayError(r, "vpcmd_sns_boresight SET boresight");
+		return false;
+	}
+
+	std::cout << "[INFO] boresightSensor1() done. Now hardware treats orientation as zero.\n"
+		<< "       And software offset for position is stored => " << g_posOffset.str() << std::endl;
+
+	return true;
+}
+
+
+
+bool clearBoresightSensor1()
+{
+	int sensorID = 0; // 与 boresightSensor1() 中使用的 ID 一致
+	CBoresightCfg emptyBore;
+	memset(&emptyBore, 0, sizeof(emptyBore));
+
+	// 1) 先清除硬件端 boresight（姿态归零补偿）
+	int r = vpcmd_sns_boresight(g_ctx, g_hnd, sensorID, CMD_ACTION_RESET, emptyBore);
+	if (r != 0)
+	{
+		DisplayError(r, "vpcmd_sns_boresight RESET");
+		return false;
+	}
+
+	// 2) 同时把软件端记录的位移偏移量 g_posOffset 重置为 (0,0,0)
+	//    这样后续 (pno.pos - g_posOffset) => (pno.pos - 0) => 原始坐标
+	g_posOffset.set(0.0, 0.0, 0.0);
+
+	cout << "[INFO] clearBoresightSensor1: sensor #" << sensorID
+		<< " boresight removed, and g_posOffset reset to zero." << endl;
+
+	return true;
+}
+
+
+
+
 
 // Run program: Ctrl + F5 or Debug > Start Without Debugging menu
 // Debug program: F5 or Debug > Start Debugging menu
