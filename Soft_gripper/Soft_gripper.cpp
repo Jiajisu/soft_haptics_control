@@ -321,8 +321,15 @@ cVector3d MatlabCalc::getDevicePressure()
 // DECLARED VARIABLES
 //------------------------------------------------------------------------------
 
+
+// write to csv
 // a file to store force
 std::ofstream csvFile;
+bool recordSensorDataToCSV = false;  // 用于是否记录传感器数据
+
+
+
+
 auto now{ std::chrono::system_clock::now() };
 // Convert the time point to duration in microseconds
 auto duration{ now.time_since_epoch() };
@@ -914,6 +921,22 @@ int main(int argc, char* argv[])
 	//--------------------------------------------------------------------------
 	//
 	Connect();
+	// 先设置帧率到30Hz
+	CFrameRateCfg cfrate;
+	int rr = vpcmd_dev_framerate(g_ctx, g_hnd, CMD_ACTION_GET, cfrate);
+	if (rr != 0) {
+		DisplayError(rr, "vpcmd_dev_framerate GET");
+	}
+	else {
+		cfrate.frame_rate = FR_60;  // FR_30即枚举0,表示 30Hz
+		rr = vpcmd_dev_framerate(g_ctx, g_hnd, CMD_ACTION_SET, cfrate);
+		if (rr != 0) {
+			DisplayError(rr, "vpcmd_dev_framerate SET to 30Hz");
+		}
+		else {
+			std::cout << "Frame rate set to 30Hz.\n";
+		}
+	}
 	config.pos_units = POS_CM;
 	config.ori_units = ORI_QUATERNION;
 	vpcmd_dev_units(g_ctx, g_hnd, CMD_ACTION_SET, &config);
@@ -921,6 +944,23 @@ int main(int argc, char* argv[])
 	// create a thread which starts the main haptics rendering loop
 	hapticsThread = new cThread();
 	hapticsThread->start(updateHaptics, CTHREAD_PRIORITY_HAPTICS);
+
+
+	// 1) 让 Polhemus 内部输出连续 PNO 数据
+	int r = vpcmd_dev_contpno(g_ctx, g_hnd, CMD_ACTION_SET);
+	if (r != 0) {
+		DisplayError(r, "vpcmd_dev_contpno SET");
+	}
+
+	// 2) 设置为 FIFO 模式
+	//    有时你只需在全局定义 g_bFIFO = true; 并在后面调用 vpctx_dev_fifopnof
+	bool g_bFIFO = true; // 全局或局部的标志
+
+	// 3) 如果想要 Polhemus 给每帧打上时间戳，则启用 time-stamp
+	//    viper 提供 vpdev_tsenable(...) 
+	bool wantTimestamp = true;
+	vpdev_tsenable(g_ctx, g_hnd, wantTimestamp);
+
 
 	// setup callback when application exits
 	atexit(close);
@@ -1067,6 +1107,13 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 		writeForceToCSV = !writeForceToCSV;
 		cout << "Writing Status: " << writeForceToCSV << endl;
 	}
+	else if (a_key == GLFW_KEY_W)
+	{
+		// 按W键时，切换记录开关
+		recordSensorDataToCSV = !recordSensorDataToCSV;
+		std::cout << "Record Sensor Data to CSV: " << recordSensorDataToCSV << std::endl;
+	}
+
 }
 
 //------------------------------------------------------------------------------
@@ -1191,11 +1238,10 @@ void updateHaptics(void)
 	cShapeCylinder* cylinderTopRel = new cShapeCylinder(relRadius, relRadius, relHeight);
 	world->addChild(cylinderTopRel);
 
-	// 给它一个不同的颜色
+
 	cylinderTopRel->m_material->setGreenForest();
 
-	// 让它在 3D 场景里“靠左侧”一点, 以免与主场景重叠
-	// (可在后面动态再加偏移)
+
 	cylinderTopRel->setLocalPos(-0.5, 0.0, 0.0); // 先往 X 方向左移
 
 
@@ -1221,70 +1267,158 @@ void updateHaptics(void)
 		PNODATA pno_1;
 		PNODATA pno_2;
 		PNODATA pno2_in_sensor1_frame;
-		vpctx_dev_lastpnof(g_ctx, g_hnd, f);
-	
-		// 假设 updateHaptics() 或类似循环中：
-		if ((MYPNOTYPE*)&(f.pF)[0])
+		// 1) 读取 Polhemus FIFO 的下一帧
+		vpFrameInfo f;
+		//  vpcmd_context g_ctx;   // 你的全局/外部变量
+		//  vpdev_hnd     g_hnd;   // 同上
+		int r = vpctx_dev_fifopnof(g_ctx, g_hnd, f);
+		if (r != 0)
 		{
-			// a) Sensor1 (cylinderBot)，使用 boresight 后姿态、软件 offset 后位置
-			pno_1 = GrabFramePNO((MYPNOTYPE*)&(f.pF)[0], 0);
-			double scale = 0.1; // cm->m
-			cVector3d curPos1(
-				pno_1.pos[0] * scale,
-				pno_1.pos[1] * scale,
-				pno_1.pos[2] * scale
-			);
-			cVector3d relPos1 = curPos1 - g_posOffset; // 让 boresight 那刻作为0
-			cQuaternion q1(pno_1.ori[0], pno_1.ori[1], pno_1.ori[2], pno_1.ori[3]);
-			cMatrix3d r1 = quaternionToMatrix(q1);
-
-			cylinderBot->setLocalPos(relPos1);
-			cylinderBot->setLocalRot(r1);
-
-			// b) Sensor2 (cylinderTop)，不做 boresight，但减同一个 offset
-			pno_2 = GrabFramePNO((MYPNOTYPE*)&(f.pF)[0], 1);
-			cVector3d curPos2(
-				pno_2.pos[0] * scale,
-				pno_2.pos[1] * scale,
-				pno_2.pos[2] * scale
-			);
-			cVector3d relPos2 = curPos2 - g_posOffset;
-			cQuaternion q2(pno_2.ori[0], pno_2.ori[1], pno_2.ori[2], pno_2.ori[3]);
-			cMatrix3d r2 = quaternionToMatrix(q2);
-
-			cylinderTop->setLocalPos(relPos2);
-			cylinderTop->setLocalRot(r2);
-
-			// c) 计算 sensor2 相对于 sensor1 的相对位姿 => 显示到 cylinderTopRel
-			PNODATA pno2_in_sensor1_frame = convertToSensor1Frame(pno_1, pno_2);
-
-			// 把相对坐标(单位仍是 cm)转换到 m
-			cVector3d sensor2RelPos(
-				pno2_in_sensor1_frame.pos[0] * scale,
-				pno2_in_sensor1_frame.pos[1] * scale,
-				pno2_in_sensor1_frame.pos[2] * scale
-			);
-			cQuaternion q2_rel(
-				pno2_in_sensor1_frame.ori[0],
-				pno2_in_sensor1_frame.ori[1],
-				pno2_in_sensor1_frame.ori[2],
-				pno2_in_sensor1_frame.ori[3]
-			);
-			cMatrix3d r2_rel = quaternionToMatrix(q2_rel);
-
-			// 如果我们也希望"相对圆柱" 以"sensor1世界位置"为基准 => 
-			//   finalPosRel = sensor1世界位置 + sensor2对sensor1的局部位置
-			//   再加一个小偏移 shift(例如Y方向0.3) 让它不与 sensor2 重叠
-			cVector3d shift(0.0, 0.3, 0.0);
-			cVector3d finalPosRel = shift + sensor2RelPos;
-			//cVector3d finalPosRel(0.0, 0.3, 0.0);
-
-			cylinderTopRel->setLocalPos(finalPosRel);
-			cylinderTopRel->setLocalRot(r2_rel);
-
-			// 也可以在此 debug:
-			// std::cout << "Sensor2RelPos: " << sensor2RelPos.str() << "\n";
+			// 如果返回 E_CTXERR_NO_MORE_DATA，说明当前还没有新帧可读
+			// 其他错误要注意处理
+			if (r != E_CTXERR_NO_MORE_DATA)
+			{
+				DisplayError(r, "vpctx_dev_fifopnof failed");
+			}
 		}
+		else
+		{
+			// 2) 检查 f.uiSize 是否有数据
+			if (f.uiSize > 0 && f.pF != nullptr)
+			{
+				// f.ts 就是时间戳(微秒级或根据 Polhemus 版本) 
+				// 只有 wantTimestamp = true 时才有意义
+				uint64_t timestamp = f.ts;
+
+				// 3) 解析传感器数据
+				//    例如 pno_1 = GrabFramePNO((MYPNOTYPE*)f.pF, 0);
+				//    pno_2 = GrabFramePNO((MYPNOTYPE*)f.pF, 1);
+				if ((MYPNOTYPE*)&(f.pF)[0])
+				{
+					// a) Sensor1 (cylinderBot)
+					pno_1 = GrabFramePNO((MYPNOTYPE*)&(f.pF)[0], 0);
+					double scale = 0.1; // cm->m
+					cVector3d curPos1(
+						pno_1.pos[0] * scale,
+						pno_1.pos[1] * scale,
+						pno_1.pos[2] * scale
+					);
+					cVector3d relPos1 = curPos1 - g_posOffset;
+					cQuaternion q1(pno_1.ori[0], pno_1.ori[1], pno_1.ori[2], pno_1.ori[3]);
+					cMatrix3d r1 = quaternionToMatrix(q1);
+
+					cylinderBot->setLocalPos(relPos1);
+					cylinderBot->setLocalRot(r1);
+
+					// b) Sensor2 (cylinderTop)
+					pno_2 = GrabFramePNO((MYPNOTYPE*)&(f.pF)[0], 1);
+					cVector3d curPos2(
+						pno_2.pos[0] * scale,
+						pno_2.pos[1] * scale,
+						pno_2.pos[2] * scale
+					);
+					cVector3d relPos2 = curPos2 - g_posOffset;
+					cQuaternion q2(pno_2.ori[0], pno_2.ori[1], pno_2.ori[2], pno_2.ori[3]);
+					cMatrix3d r2 = quaternionToMatrix(q2);
+
+					cylinderTop->setLocalPos(relPos2);
+					cylinderTop->setLocalRot(r2);
+
+					// c) calculate relative positio  sensor2 
+					PNODATA pno2_in_sensor1_frame = convertToSensor1Frame(pno_1, pno_2);
+
+
+					cVector3d sensor2RelPos(
+						pno2_in_sensor1_frame.pos[0] * scale,
+						pno2_in_sensor1_frame.pos[1] * scale,
+						pno2_in_sensor1_frame.pos[2] * scale
+					);
+					cQuaternion q2_rel(
+						pno2_in_sensor1_frame.ori[0],
+						pno2_in_sensor1_frame.ori[1],
+						pno2_in_sensor1_frame.ori[2],
+						pno2_in_sensor1_frame.ori[3]
+					);
+					cMatrix3d r2_rel = quaternionToMatrix(q2_rel);
+
+
+					cVector3d shift(0.0, 0.3, 0.0);
+					cVector3d finalPosRel = shift + sensor2RelPos;
+					//cVector3d finalPosRel(0.0, 0.3, 0.0);
+
+					cylinderTopRel->setLocalPos(finalPosRel);
+					cylinderTopRel->setLocalRot(r2_rel);
+
+
+					//std::cout << "Result: \n";
+					//std::cout << "pos_rel_test: ("
+					//	<< pno2_in_sensor1_frame.pos[0] << ", "
+					//	<< pno2_in_sensor1_frame.pos[1] << ", "
+					//	<< pno2_in_sensor1_frame.pos[2] << "\r";
+					//std::cout << "q_rel_test: ("
+					//	<< result_test.ori[0] << ", "
+					//	<< result_test.ori[1] << ", "
+					//	<< result_test.ori[2] << ", "
+					//	<< result_test.ori[3] << ")\n";
+
+					//pno2_in_sensor1_frame.pos[0] * scale,
+					//	pno2_in_sensor1_frame.pos[1] * scale,
+					//	pno2_in_sensor1_frame.pos[2] * scale
+
+					if (recordSensorDataToCSV)  // 你自己定义的开关
+					{
+						// 把 timestamp 转为字符串（单位可选 microseconds or seconds）
+						// 例如 double t_sec = (double)timestamp / 1e6;
+						// std::string timeStr = std::to_string(t_sec);
+						std::string timeStr = std::to_string((double)timestamp);
+
+						// 准备一个 row
+						std::vector<std::string> row;
+
+						// 1) 时间戳
+						row.push_back(timeStr);
+
+						// 2) Sensor1 pos
+						row.push_back(std::to_string(pno_1.pos[0]));
+						row.push_back(std::to_string(pno_1.pos[1]));
+						row.push_back(std::to_string(pno_1.pos[2]));
+
+						// 3) Sensor1 ori (注意顺序 w, x, y, z 或 x, y, z, w, 需确认)
+						row.push_back(std::to_string(pno_1.ori[0]));
+						row.push_back(std::to_string(pno_1.ori[1]));
+						row.push_back(std::to_string(pno_1.ori[2]));
+						row.push_back(std::to_string(pno_1.ori[3]));
+
+						// 4) Sensor2 pos
+						row.push_back(std::to_string(pno_2.pos[0]));
+						row.push_back(std::to_string(pno_2.pos[1]));
+						row.push_back(std::to_string(pno_2.pos[2]));
+
+						// 5) Sensor2 ori
+						row.push_back(std::to_string(pno_2.ori[0]));
+						row.push_back(std::to_string(pno_2.ori[1]));
+						row.push_back(std::to_string(pno_2.ori[2]));
+						row.push_back(std::to_string(pno_2.ori[3]));
+						// 6) Relative pos & ori (sensor2_in_sensor1_frame)
+						row.push_back(std::to_string(pno2_in_sensor1_frame.pos[0]));
+						row.push_back(std::to_string(pno2_in_sensor1_frame.pos[1]));
+						row.push_back(std::to_string(pno2_in_sensor1_frame.pos[2]));
+
+						row.push_back(std::to_string(pno2_in_sensor1_frame.ori[0]));
+						row.push_back(std::to_string(pno2_in_sensor1_frame.ori[1]));
+						row.push_back(std::to_string(pno2_in_sensor1_frame.ori[2]));
+						row.push_back(std::to_string(pno2_in_sensor1_frame.ori[3]));
+
+						// 调用已有的 CSV 写函数
+						writeToCSV(row);
+					}
+
+
+				}
+			}
+		}
+	
+		
 
 		/////////////////////////////////////////////////////////////////////////
 		// FRAME TRANS TEST
@@ -1429,13 +1563,21 @@ void arduinoWriteData(unsigned int delay_time, string send_str)
 	//Sleep(delay_time);
 }
 
-void openCSV(const std::string& filename) {
-	csvFile.open(filename, std::ios::app);  // Open in append mode to keep writing data
-
+void openCSV(const std::string& filename)
+{
+	csvFile.open(filename, std::ios::app);
 	if (!csvFile.is_open()) {
 		std::cerr << "Unable to open file" << std::endl;
+		return;
 	}
+	// 写表头（只要在第一次写时写一次即可）
+	csvFile << "Timestamp,"
+		<< "S1_posX,S1_posY,S1_posZ,S1_oriW,S1_oriX,S1_oriY,S1_oriZ,"
+		<< "S2_posX,S2_posY,S2_posZ,S2_oriW,S2_oriX,S2_oriY,S2_oriZ,"
+		<< "Rel_posX,Rel_posY,Rel_posZ,Rel_oriW,Rel_oriX,Rel_oriY,Rel_oriZ\n";
+	csvFile.flush();
 }
+
 
 // Function to write data to the open CSV file
 void writeToCSV(const std::vector<string>& row) {
@@ -1546,11 +1688,11 @@ bool StopCont()
 //------------------------------------------------------------------------------
 bool boresightSensor1()
 {
-	// 假设 sensorID=0 即“sensor1”，若硬件配置中 sensor1 是 ID=1，则改成1
+	// Assume sensorID=0 is "sensor1". If in the hardware configuration sensor1 is ID=1, then change it to 1.
 	int sensorID = 0;
 
-	// (1) 在调用 boresight 之前，先读取一帧当前姿态(位置+四元数)
-	//     目的是获取“当前pos”以便软件端做 offset。
+	// (1) Before calling boresight, read one frame of the current pose (position + quaternion).
+	//     The purpose is to obtain the "current position" so that the software can do offset.
 	// ------------------------------------------------------------------
 	vpFrameInfo tmpFrame;
 	int ret = vpctx_dev_lastpnof(g_ctx, g_hnd, tmpFrame);
@@ -1567,22 +1709,22 @@ bool boresightSensor1()
 		return false;
 	}
 
-	// 读取 sensorID 对应 pno
+	// Read the pno data corresponding to sensorID.
 	PNODATA pnoCur = GrabFramePNO(pF, sensorID);
 
-	// （可选）若pos_units是CM，且我们要用米，则做换算
-	//         取决于 config.pos_units
-	//         如果你之前在 updateHaptics 中也做了 *0.1，这里就同步处理
+	// (Optional) If pos_units is CM and we want to use meters, then do the conversion.
+	//            This depends on config.pos_units.
+	//            If you previously multiplied by 0.1 in updateHaptics, do the same here.
 	cVector3d pnoCurPos(
 		pnoCur.pos[0] * 0.1,
 		pnoCur.pos[1] * 0.1,
 		pnoCur.pos[2] * 0.1
 	);
 
-	// 记录到全局 offset => 让后续 "pos - g_posOffset" = 0
+	// Record to the global offset => so that subsequent "pos - g_posOffset" = 0.
 	g_posOffset = pnoCurPos;
 
-	// (2) 设置硬件 boresight => 让当前姿态变为“无旋转”
+	// (2) Set the hardware boresight => make the current orientation become "no rotation".
 	// ------------------------------------------------------------------
 	CBoresightCfg newBore;
 	memset(&newBore, 0, sizeof(newBore));
@@ -1598,14 +1740,14 @@ bool boresightSensor1()
 	}
 	else
 	{
-		// 如果是 Euler 模式 => [Az,El,Roll] = [0,0,0]
+		// If in Euler mode => [Az, El, Roll] = [0, 0, 0]
 		newBore.params[0] = 0.0f;
 		newBore.params[1] = 0.0f;
 		newBore.params[2] = 0.0f;
 		newBore.params[3] = 0.0f;
 	}
 
-	// 调用 Polhemus API
+	// Call the Polhemus API.
 	int r = vpcmd_sns_boresight(g_ctx, g_hnd, sensorID, CMD_ACTION_SET, newBore);
 	if (r != 0)
 	{
@@ -1623,11 +1765,12 @@ bool boresightSensor1()
 
 bool clearBoresightSensor1()
 {
-	int sensorID = 0; // 与 boresightSensor1() 中使用的 ID 一致
+	// The same ID used in boresightSensor1()
+	int sensorID = 0;
 	CBoresightCfg emptyBore;
 	memset(&emptyBore, 0, sizeof(emptyBore));
 
-	// 1) 先清除硬件端 boresight（姿态归零补偿）
+	// 1) First clear the hardware boresight (reset orientation compensation)
 	int r = vpcmd_sns_boresight(g_ctx, g_hnd, sensorID, CMD_ACTION_RESET, emptyBore);
 	if (r != 0)
 	{
@@ -1635,8 +1778,9 @@ bool clearBoresightSensor1()
 		return false;
 	}
 
-	// 2) 同时把软件端记录的位移偏移量 g_posOffset 重置为 (0,0,0)
-	//    这样后续 (pno.pos - g_posOffset) => (pno.pos - 0) => 原始坐标
+	// 2) Also reset the software displacement offset g_posOffset to (0,0,0)
+	//    This way, any subsequent calculation like (pno.pos - g_posOffset) 
+	//    becomes (pno.pos - 0), i.e., the original coordinates.
 	g_posOffset.set(0.0, 0.0, 0.0);
 
 	cout << "[INFO] clearBoresightSensor1: sensor #" << sensorID
@@ -1644,6 +1788,7 @@ bool clearBoresightSensor1()
 
 	return true;
 }
+
 
 
 
