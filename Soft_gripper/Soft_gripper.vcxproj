@@ -19,13 +19,19 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="ControlPCC.cpp" />
     <ClCompile Include="frameTrans.cpp" />
     <ClCompile Include="Soft_gripper.cpp" />
     <ClCompile Include="SerialPort.cpp" />
+    <ClCompile Include="TimeUtil.cpp" />
+    <ClCompile Include="TrajectoryGenerator.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="ControlPCC.hpp" />
     <ClInclude Include="frameTrans.hpp" />
     <ClInclude Include="SerialPort.hpp" />
+    <ClInclude Include="TimeUtil.hpp" />
+    <ClInclude Include="TrajectoryGenerator.hpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <ProjectName>Soft_gripper</ProjectName>

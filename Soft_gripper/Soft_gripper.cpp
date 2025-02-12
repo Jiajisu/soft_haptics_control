@@ -1,46 +1,7 @@
-﻿//==============================================================================
-/*
-	Software License Agreement (BSD License)
-	Copyright (c) 2003-2016, CHAI3D.
-	(www.chai3d.org)
-
-	All rights reserved.
-
-	Redistribution and use in source and binary forms, with or without
-	modification, are permitted provided that the following conditions
-	are met:
-
-	* Redistributions of source code must retain the above copyright
-	notice, this list of conditions and the following disclaimer.
-
-	* Redistributions in binary form must reproduce the above
-	copyright notice, this list of conditions and the following
-	disclaimer in the documentation and/or other materials provided
-	with the distribution.
-
-	* Neither the name of CHAI3D nor the names of its contributors may
-	be used to endorse or promote products derived from this software
-	without specific prior written permission.
-
-	THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-	"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-	LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
-	FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
-	COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
-	INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
-	BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
-	LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-	CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
-	LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
-	ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-	POSSIBILITY OF SUCH DAMAGE.
-
-	\author    <http://www.chai3d.org>
-	\author    Francois Conti
-	\version   3.2.0 $Rev: 1925 $
-*/
-
-//============================Adruino===========================================
+﻿
+//------------------------------------------------------------------------------
+// Arduino
+//------------------------------------------------------------------------------
 #include "SerialPort.hpp"
 #include <iomanip>
 //------------------------------------------------------------------------------
@@ -52,7 +13,9 @@
 #include <vector>
 #include <chrono>
 
-//---------------------------Pohelmus-------------------------------------------
+//------------------------------------------------------------------------------
+// Pohelmus
+//------------------------------------------------------------------------------
 #include <cstdio>
 #include <cstdlib>
 #include "VPcmdIF.h"
@@ -66,8 +29,13 @@
 using namespace chai3d;
 using namespace std;
 //------------------------------------------------------------------------------
+// Self Define functions 
+//------------------------------------------------------------------------------
 
 #include "frameTrans.hpp"
+#include "ControlPCC.hpp"
+#include "TrajectoryGenerator.hpp"
+#include "TimeUtil.hpp"
 
 //------------------------------------------------------------------------------
 // GENERAL SETTINGS
@@ -88,235 +56,235 @@ bool fullscreen = false;
 // mirrored display
 bool mirroredDisplay = false;
 
-//------------------------------------------------------------------------------
-// HAPTIC INVERSE KINEMATIC CLASS
-//------------------------------------------------------------------------------
+////------------------------------------------------------------------------------
+//// HAPTIC INVERSE KINEMATIC CLASS
+////------------------------------------------------------------------------------
 cVector3d test_pressure{ 0,0,0 };
-class MatlabCalc
-{
-private:
-	const int d;
-	const double b;
-	const double k;
-	const double h_0;
-
-	cVector3d my_pressure;
-	cVector3d my_pos;
-	double delta_t;
-	double tolerance;
-	const int MAX_ITERS;
-	const double EPSILON;
-	const double MULTIPLIER;
-public:
-	MatlabCalc(/* args */);
-	~MatlabCalc();
-	void setTargetPos(cVector3d& new_target_pos);
-	cVector3d calcForwardPressurePos(cVector3d& x);
-	cVector3d calcForwardPressurePosInverse(cVector3d& x);
-	cVector3d MatlabCalc::TaskToConfig();
-	cVector3d forwardKinematic(cVector3d& pressure, bool pressure_flag); // true, input is press
-	double calcKappa(cVector3d& length);
-	double calcPhi(cVector3d& length);
-	double calcTheta(cVector3d& length);
-	cMatrix3d calcJacobian(cVector3d& length);
-	vector<cVector3d> updateMotion(cVector3d& pressure, cVector3d& pos);
-	void reachTarget(cVector3d& target_pos);
-	cVector3d getDevicePressure();
-	double heaviside(double var);
-};
-
-MatlabCalc::MatlabCalc()
-	: d(12),
-	b(16.351),
-	k(0.232),
-	h_0(20),
-	MAX_ITERS(5000),
-	MULTIPLIER(0.2),
-	EPSILON(1e-6),
-	delta_t(0.02),
-	tolerance(0.05),
-	my_pressure{ 20, 20, 20 },
-	my_pos{ 0, 0, 0 } // Initializing constants and other variables
-{
-
-}
-
-
-MatlabCalc::~MatlabCalc()
-{
-
-}
-double MatlabCalc::heaviside(double var)
-{
-	if (var < 0)
-	{
-		return 0;
-	}
-	else if (var > 0)
-	{
-		return 1;
-	}
-	else
-	{
-		return 0.5;
-	}
-}
-
-void MatlabCalc::setTargetPos(cVector3d& new_target_pos)
-{
-	my_pos = new_target_pos;
-}
-
-cVector3d MatlabCalc::calcForwardPressurePos(cVector3d& x)
-{
-	// New modify
-	size_t n{ 3 };
-	cVector3d result;
-	for (size_t i{ 0 }; i < 3; ++i)
-	{
-		result(i) = heaviside(x(i) - h_0) * (k * x(i) + b) + heaviside(h_0 - x(i)) * (k * x(i) + b);
-	}
-	return result;
-
-}
-cVector3d MatlabCalc::calcForwardPressurePosInverse(cVector3d& x)
-{
-	// New modify
-	size_t n{ 3 };
-	cVector3d result;
-	for (size_t i{ 0 }; i < 3; ++i)
-	{
-		result(i) = heaviside(x(i) - h_0) * (x(i) - b) / k + heaviside(h_0 - x(i)) * (x(i) - b) / k;
-	}
-	return result;
-
-}
-double MatlabCalc::calcKappa(cVector3d& length)
-{
-	return 2 * sqrt(pow(length(0), 2) + pow(length(1), 2) + pow(length(2), 2)
-		- length(0) * length(1) - length(1) * length(2) - length(0) * length(2))
-		/ (d * (length(0) + length(1) + length(2)));
-}
-
-double MatlabCalc::calcPhi(cVector3d& length)
-{
-	return atan2(sqrt(3) * (length(1) + length(2) - 2 * length(0)), 3 * (length(1) - length(2)));
-}
-
-double MatlabCalc::calcTheta(cVector3d& length)
-{
-	return 2 * sqrt(pow(length(0), 2) + pow(length(1), 2) + pow(length(2), 2)
-		- length(0) * length(1) - length(1) * length(2) - length(0) * length(2))
-		/ (d * 3);
-}
-
-cVector3d MatlabCalc::forwardKinematic(cVector3d& pressure, bool pressure_flag)
-{
-	cVector3d length = pressure;
-
-
-	if (pressure_flag)
-	{
-		length = calcForwardPressurePos(pressure);
-	}
-
-
-	double phi = calcPhi(length);
-	double theta = calcTheta(length);
-	double kappa = calcKappa(length);
-
-	double x_out = cos(phi) * (1 - cos(theta)) / kappa;
-	double y_out = sin(phi) * (1 - cos(theta)) / kappa;
-	double z_out = sin(theta) / kappa;
-
-	return cVector3d(x_out, y_out, z_out);
-}
-
-cMatrix3d MatlabCalc::calcJacobian(cVector3d& length)
-{
-	size_t n = 3;
-	cMatrix3d J;
-	J.identity();
-	cVector3d l_perturbed = length;
-	cVector3d origin = forwardKinematic(length, false);
-	for (size_t i = 0; i < n; ++i)
-	{
-		l_perturbed = length;
-		l_perturbed(i) += EPSILON;
-
-		cVector3d origin_perturbed = forwardKinematic(l_perturbed, false);
-
-		for (size_t j = 0; j < n; ++j)
-		{
-			J(j, i) = (origin_perturbed(j) - origin(j)) / EPSILON;
-		}
-	}
-	return J;
-}
-
-vector<cVector3d> MatlabCalc::updateMotion(cVector3d& pressure, cVector3d& pos)
-{
-	if (pressure(0) == pressure(1) && pressure(1) == pressure(2))
-	{
-		pressure(2) += 0.00001;
-	}
-	cVector3d current_pos = forwardKinematic(pressure, true);
-	cVector3d current_length = calcForwardPressurePos(pressure);
-	cMatrix3d J = calcJacobian(current_length);
-	cMatrix3d J_inverse = J;
-	J_inverse.invert();
-	cVector3d error = pos - current_pos;
-	cVector3d target_vel = error / error.length() * MULTIPLIER;
-	cVector3d l_dot = J_inverse * target_vel;
-	cVector3d new_length = current_length + l_dot * delta_t;
-	cVector3d new_pos = forwardKinematic(new_length, false);
-	cVector3d new_pressure = calcForwardPressurePosInverse(new_length);
-	return { new_pos, new_pressure };
-}
-
-void MatlabCalc::reachTarget(cVector3d& target_pos)
-{
-	size_t iter{ 0 };
-	my_pressure = cVector3d(20, 20, 20);
-	while (iter < MAX_ITERS)
-	{
-
-		my_pos = updateMotion(my_pressure, target_pos)[0];
-		test_pressure = updateMotion(my_pressure, target_pos)[1];
-		double error = (my_pos - target_pos).length();
-		if (error < tolerance)
-		{
-			// SAFETY CHECK
-			for (size_t i{ 0 }; i < 3; ++i)
-			{
-				if (test_pressure(i) < 0)
-				{
-					test_pressure(i) = 0;
-					//cout << "\rWaiting for acutating.." << flush;
-				}
-				if (test_pressure(i) >= 35)
-				{
-					test_pressure(i) = 35;
-					//cout << "\rAxis " << i << "reached limitation" << flush;
-				}
-			}
-			//cout << "\033[F\033[F\033[F";
-			//cout << "Target Reached, iteration: " << iter << endl;
-			//cout << "Input Position: " << my_pos << endl;
-			//cout << "Input Pressure: " << test_pressure << endl;
-			std::cout.flush();
-			break;
-		}
-
-		my_pressure = test_pressure;
-		iter += 1;
-	}
-}
-//cVector3d MatlabCalc::TaskToConfig() {}
-cVector3d MatlabCalc::getDevicePressure()
-{
-	return my_pressure;
-}
+//class MatlabCalc
+//{
+//private:
+//	const int d;
+//	const double b;
+//	const double k;
+//	const double h_0;
+//
+//	cVector3d my_pressure;
+//	cVector3d my_pos;
+//	double delta_t;
+//	double tolerance;
+//	const int MAX_ITERS;
+//	const double EPSILON;
+//	const double MULTIPLIER;
+//public:
+//	MatlabCalc(/* args */);
+//	~MatlabCalc();
+//	void setTargetPos(cVector3d& new_target_pos);
+//	cVector3d calcForwardPressurePos(cVector3d& x);
+//	cVector3d calcForwardPressurePosInverse(cVector3d& x);
+//	cVector3d MatlabCalc::TaskToConfig();
+//	cVector3d forwardKinematic(cVector3d& pressure, bool pressure_flag); // true, input is press
+//	double calcKappa(cVector3d& length);
+//	double calcPhi(cVector3d& length);
+//	double calcTheta(cVector3d& length);
+//	cMatrix3d calcJacobian(cVector3d& length);
+//	vector<cVector3d> updateMotion(cVector3d& pressure, cVector3d& pos);
+//	void reachTarget(cVector3d& target_pos);
+//	cVector3d getDevicePressure();
+//	double heaviside(double var);
+//};
+//
+//MatlabCalc::MatlabCalc()
+//	: d(12),
+//	b(16.351),
+//	k(0.232),
+//	h_0(20),
+//	MAX_ITERS(5000),
+//	MULTIPLIER(0.2),
+//	EPSILON(1e-6),
+//	delta_t(0.02),
+//	tolerance(0.05),
+//	my_pressure{ 20, 20, 20 },
+//	my_pos{ 0, 0, 0 } // Initializing constants and other variables
+//{
+//
+//}
+//
+//
+//MatlabCalc::~MatlabCalc()
+//{
+//
+//}
+//double MatlabCalc::heaviside(double var)
+//{
+//	if (var < 0)
+//	{
+//		return 0;
+//	}
+//	else if (var > 0)
+//	{
+//		return 1;
+//	}
+//	else
+//	{
+//		return 0.5;
+//	}
+//}
+//
+//void MatlabCalc::setTargetPos(cVector3d& new_target_pos)
+//{
+//	my_pos = new_target_pos;
+//}
+//
+//cVector3d MatlabCalc::calcForwardPressurePos(cVector3d& x)
+//{
+//	// New modify
+//	size_t n{ 3 };
+//	cVector3d result;
+//	for (size_t i{ 0 }; i < 3; ++i)
+//	{
+//		result(i) = heaviside(x(i) - h_0) * (k * x(i) + b) + heaviside(h_0 - x(i)) * (k * x(i) + b);
+//	}
+//	return result;
+//
+//}
+//cVector3d MatlabCalc::calcForwardPressurePosInverse(cVector3d& x)
+//{
+//	// New modify
+//	size_t n{ 3 };
+//	cVector3d result;
+//	for (size_t i{ 0 }; i < 3; ++i)
+//	{
+//		result(i) = heaviside(x(i) - h_0) * (x(i) - b) / k + heaviside(h_0 - x(i)) * (x(i) - b) / k;
+//	}
+//	return result;
+//
+//}
+//double MatlabCalc::calcKappa(cVector3d& length)
+//{
+//	return 2 * sqrt(pow(length(0), 2) + pow(length(1), 2) + pow(length(2), 2)
+//		- length(0) * length(1) - length(1) * length(2) - length(0) * length(2))
+//		/ (d * (length(0) + length(1) + length(2)));
+//}
+//
+//double MatlabCalc::calcPhi(cVector3d& length)
+//{
+//	return atan2(sqrt(3) * (length(1) + length(2) - 2 * length(0)), 3 * (length(1) - length(2)));
+//}
+//
+//double MatlabCalc::calcTheta(cVector3d& length)
+//{
+//	return 2 * sqrt(pow(length(0), 2) + pow(length(1), 2) + pow(length(2), 2)
+//		- length(0) * length(1) - length(1) * length(2) - length(0) * length(2))
+//		/ (d * 3);
+//}
+//
+//cVector3d MatlabCalc::forwardKinematic(cVector3d& pressure, bool pressure_flag)
+//{
+//	cVector3d length = pressure;
+//
+//
+//	if (pressure_flag)
+//	{
+//		length = calcForwardPressurePos(pressure);
+//	}
+//
+//
+//	double phi = calcPhi(length);
+//	double theta = calcTheta(length);
+//	double kappa = calcKappa(length);
+//
+//	double x_out = cos(phi) * (1 - cos(theta)) / kappa;
+//	double y_out = sin(phi) * (1 - cos(theta)) / kappa;
+//	double z_out = sin(theta) / kappa;
+//
+//	return cVector3d(x_out, y_out, z_out);
+//}
+//
+//cMatrix3d MatlabCalc::calcJacobian(cVector3d& length)
+//{
+//	size_t n = 3;
+//	cMatrix3d J;
+//	J.identity();
+//	cVector3d l_perturbed = length;
+//	cVector3d origin = forwardKinematic(length, false);
+//	for (size_t i = 0; i < n; ++i)
+//	{
+//		l_perturbed = length;
+//		l_perturbed(i) += EPSILON;
+//
+//		cVector3d origin_perturbed = forwardKinematic(l_perturbed, false);
+//
+//		for (size_t j = 0; j < n; ++j)
+//		{
+//			J(j, i) = (origin_perturbed(j) - origin(j)) / EPSILON;
+//		}
+//	}
+//	return J;
+//}
+//
+//vector<cVector3d> MatlabCalc::updateMotion(cVector3d& pressure, cVector3d& pos)
+//{
+//	if (pressure(0) == pressure(1) && pressure(1) == pressure(2))
+//	{
+//		pressure(2) += 0.00001;
+//	}
+//	cVector3d current_pos = forwardKinematic(pressure, true);
+//	cVector3d current_length = calcForwardPressurePos(pressure);
+//	cMatrix3d J = calcJacobian(current_length);
+//	cMatrix3d J_inverse = J;
+//	J_inverse.invert();
+//	cVector3d error = pos - current_pos;
+//	cVector3d target_vel = error / error.length() * MULTIPLIER;
+//	cVector3d l_dot = J_inverse * target_vel;
+//	cVector3d new_length = current_length + l_dot * delta_t;
+//	cVector3d new_pos = forwardKinematic(new_length, false);
+//	cVector3d new_pressure = calcForwardPressurePosInverse(new_length);
+//	return { new_pos, new_pressure };
+//}
+//
+//void MatlabCalc::reachTarget(cVector3d& target_pos)
+//{
+//	size_t iter{ 0 };
+//	my_pressure = cVector3d(20, 20, 20);
+//	while (iter < MAX_ITERS)
+//	{
+//
+//		my_pos = updateMotion(my_pressure, target_pos)[0];
+//		test_pressure = updateMotion(my_pressure, target_pos)[1];
+//		double error = (my_pos - target_pos).length();
+//		if (error < tolerance)
+//		{
+//			// SAFETY CHECK
+//			for (size_t i{ 0 }; i < 3; ++i)
+//			{
+//				if (test_pressure(i) < 0)
+//				{
+//					test_pressure(i) = 0;
+//					//cout << "\rWaiting for acutating.." << flush;
+//				}
+//				if (test_pressure(i) >= 35)
+//				{
+//					test_pressure(i) = 35;
+//					//cout << "\rAxis " << i << "reached limitation" << flush;
+//				}
+//			}
+//			//cout << "\033[F\033[F\033[F";
+//			//cout << "Target Reached, iteration: " << iter << endl;
+//			//cout << "Input Position: " << my_pos << endl;
+//			//cout << "Input Pressure: " << test_pressure << endl;
+//			std::cout.flush();
+//			break;
+//		}
+//
+//		my_pressure = test_pressure;
+//		iter += 1;
+//	}
+//}
+////cVector3d MatlabCalc::TaskToConfig() {}
+//cVector3d MatlabCalc::getDevicePressure()
+//{
+//	return my_pressure;
+//}
 //------------------------------------------------------------------------------
 // DECLARED VARIABLES
 //------------------------------------------------------------------------------
@@ -325,16 +293,16 @@ cVector3d MatlabCalc::getDevicePressure()
 // write to csv
 // a file to store force
 std::ofstream csvFile;
-bool recordSensorDataToCSV = false;  // 用于是否记录传感器数据
+bool recordSensorDataToCSV = false;  // toggle if record sensor value
 
 
 
 
-auto now{ std::chrono::system_clock::now() };
-// Convert the time point to duration in microseconds
-auto duration{ now.time_since_epoch() };
-// Convert to microseconds and then to double seconds
-string timestamp;
+//auto now{ std::chrono::system_clock::now() };
+//// Convert the time point to duration in microseconds
+//auto duration{ now.time_since_epoch() };
+//// Convert to microseconds and then to double seconds
+//string timestamp;
 // a world that contains all objects of the virtual environment
 cWorld* world;
 
@@ -411,9 +379,9 @@ void arduinoWriteData(unsigned int delay_time, string send_str);
 cVector3d proxyPos;
 double posMagnitude;
 //------------------------------------------------------------------------------
-// DECLARED Arduino Connection
+// DECLARED Control functions 
 //------------------------------------------------------------------------------
-MatlabCalc myIK;
+ControlPCC ResolvedRateControl;
 //------------------------------------------------------------------------------
 // DECLARED FUNCTIONS
 //------------------------------------------------------------------------------
@@ -499,25 +467,13 @@ bool StopCont();
 bool boresightSensor1();
 bool clearBoresightSensor1();
 PNODATA GrabFramePNO(MYPNOTYPE* pv, uint32_t s_index);
-//PNODATA convertToSensor1Frame(const PNODATA& sensor1, const PNODATA& sensor2);
-/****************************************************************************
-TEST Identifier
- ****************************************************************************/
-
-//cMatrix3d quaternionToMatrix(const cQuaternion& q);
-//cVector3d matrixVectorMultiply(const cMatrix3d& R, const cVector3d& v);
-//cQuaternion quaternionConjugate(const cQuaternion& q);
-//cQuaternion quaternionNormalize(const cQuaternion& q);
-//cQuaternion quaternionMultiply(const cQuaternion& q1, const cQuaternion& q2);
-//cMatrix3d matrixTranspose(const cMatrix3d& M);
-
+double getCurrentTime();
 
 //==============================================================================
 /*
-	DEMO:   13-primitives.cpp
-
-	This example illustrates how to build simple triangle based mesh primitives
-	using the functions provided in file graphics/CPrimitives.h
+	Soft haptic gripper 2025
+	Jiaji Su 
+	Zonghe Chua
 */
 //==============================================================================
 
@@ -530,16 +486,18 @@ int main(int argc, char* argv[])
 	cout << endl;
 	cout << "-----------------------------------" << endl;
 	cout << "CHAI3D" << endl;
-	cout << "Demo: 13-primitives" << endl;
+	cout << "Jiaji Su Soft Haptic " << endl;
 	cout << "Copyright 2003-2016" << endl;
 	cout << "-----------------------------------" << endl << endl << endl;
 	cout << "Keyboard Options:" << endl << endl;
-	cout << "[s] - Save copy of shadowmap to file" << endl;
-	cout << "[f] - Enable/Disable full screen mode" << endl;
-	cout << "[m] - Enable/Disable vertical mirroring" << endl;
 	cout << "[q] - Exit application" << endl;
 	cout << "[b] - Boresight sensor1 (0,0,0)+(0,0,0,1)" << endl;
 	cout << "[r] - Clear boresight for sensor1 " << endl;
+	cout << "[o] - Open CSV file for writing" << endl;      
+	cout << "[w] - Writing sensor1 sensor2 rel_sensor2 data to CSV" << endl; 
+	cout << "[k] - Writing scaled force generated by CHAI3D" << endl;
+	cout << "[I] - Start communication with Arduino" << endl;
+
 
 	cout << endl << endl;
 
@@ -862,7 +820,9 @@ int main(int argc, char* argv[])
 		cVector3d(0, 0, -0.05),
 		cMatrix3d(cDegToRad(0), cDegToRad(0), cDegToRad(0), C_EULER_ORDER_XYZ)
 	);
-
+	/////////////////////////////////////////////////////////////////////////
+    // Local Coordinate
+    /////////////////////////////////////////////////////////////////////////
 	// set material properties
 	cone->m_material->setBluePaleTurquoise();
 	cone->m_material->setStiffness(0.95 * maxStiffness);
@@ -873,7 +833,31 @@ int main(int argc, char* argv[])
 	// use display list to optimize graphic rendering performance
 	cone->setUseDisplayList(true);
 
+	// 创建并显示 X 轴 (红色)
+	cShapeLine* axisX = new cShapeLine(
+		cVector3d(-10, 0, 0),   // 起点
+		cVector3d(10, 0, 0)  // 终点, 你可以自己设长度
+	);
+	axisX->m_material->setRedCrimson(); // 设定红色
 
+	// 创建并显示 Y 轴 (绿色)
+	cShapeLine* axisY = new cShapeLine(
+		cVector3d(0, -10, 0),
+		cVector3d(0, 10, 0)
+	);
+	axisY->m_material->setGreenForest();
+
+	// 创建并显示 Z 轴 (蓝色)
+	cShapeLine* axisZ = new cShapeLine(
+		cVector3d(0, 0, -10),
+		cVector3d(0, 0, 10)
+	);
+	axisZ->m_material->setBlueRoyal();
+
+	// 加入到场景 (world) 或其它父节点
+	world->addChild(axisX);
+	world->addChild(axisY);
+	world->addChild(axisZ);
 
 	//--------------------------------------------------------------------------
 	// CREATE SHADERS
@@ -928,7 +912,7 @@ int main(int argc, char* argv[])
 		DisplayError(rr, "vpcmd_dev_framerate GET");
 	}
 	else {
-		cfrate.frame_rate = FR_60;  // FR_30即枚举0,表示 30Hz
+		cfrate.frame_rate = FR_240;  // FR_30即枚举0,表示 30Hz
 		rr = vpcmd_dev_framerate(g_ctx, g_hnd, CMD_ACTION_SET, cfrate);
 		if (rr != 0) {
 			DisplayError(rr, "vpcmd_dev_framerate SET to 30Hz");
@@ -958,8 +942,8 @@ int main(int argc, char* argv[])
 
 	// 3) 如果想要 Polhemus 给每帧打上时间戳，则启用 time-stamp
 	//    viper 提供 vpdev_tsenable(...) 
-	bool wantTimestamp = true;
-	vpdev_tsenable(g_ctx, g_hnd, wantTimestamp);
+	bool wantViperTimestamp = true;
+	vpdev_tsenable(g_ctx, g_hnd, wantViperTimestamp);
 
 
 	// setup callback when application exits
@@ -1169,44 +1153,6 @@ void updateGraphics(void)
 	GLenum err = glGetError();
 	if (err != GL_NO_ERROR) cout << "Error: " << gluErrorString(err) << endl;
 
-	// Arduino Pos to Pressure, TODO
-	proxyPos = tool->getDeviceLocalForce();
-	try
-	{
-		posMagnitude = proxyPos.length();
-		// Remap function for Jiaji
-		posMagnitude = (posMagnitude - 0) * (3 - 0) / (20 - 0) + 0;
-		proxyPos.normalize();
-	}
-	catch (const std::exception&)
-	{
-		cout << "Touch some thing" << endl;
-	}
-
-	try
-	{
-		// Spring Kp = 4
-		myIK.reachTarget(proxyPos * posMagnitude * 4 + cVector3d(0, 0, 20));
-	}
-	catch (const std::exception& e)
-	{
-		cout << "Something is really wrong" << e.what() << endl;
-		MatlabCalc myIK;
-
-	}
-	if (sendPosToArduino)
-	{
-		arduinoWriteData(1, test_pressure.str());
-	}
-	if (writeForceToCSV)
-	{
-		now = std::chrono::system_clock::now();
-		duration = now.time_since_epoch();
-		timestamp = std::to_string(std::chrono::duration<double>(duration).count());
-		cVector3d posData = tool->getDeviceLocalForce();
-		writeToCSV(std::vector<string> {timestamp, std::to_string(posData(0)), std::to_string(posData(1)), std::to_string(posData(2))}); // Waiting for testing
-	}
-
 }
 
 //------------------------------------------------------------------------------
@@ -1240,10 +1186,18 @@ void updateHaptics(void)
 
 
 	cylinderTopRel->m_material->setGreenForest();
-
-
 	cylinderTopRel->setLocalPos(-0.5, 0.0, 0.0); // 先往 X 方向左移
 
+	double sphereRadius = 0.05; // 小球半径 (可根据需要调整)
+	cShapeSphere* sphereTarget = new cShapeSphere(sphereRadius);
+
+	// 设置材质或颜色
+	sphereTarget->m_material->setBlueCornflower(); // 示例颜色
+	sphereTarget->m_material->setTransparencyLevel(0.6);  // 半透明 (0.0 ~ 1.0)
+	sphereTarget->setUseTransparency(true); // 启用透明效果
+
+	// 将小球添加到场景
+	world->addChild(sphereTarget);
 
 
 	// simulation in now running
@@ -1275,29 +1229,34 @@ void updateHaptics(void)
 		if (r != 0)
 		{
 			// 如果返回 E_CTXERR_NO_MORE_DATA，说明当前还没有新帧可读
-			// 其他错误要注意处理
-			if (r != E_CTXERR_NO_MORE_DATA)
-			{
-				DisplayError(r, "vpctx_dev_fifopnof failed");
-			}
+			// 如果返回其他错误，也无法读取到有效数据
+			//if (r != E_CTXERR_NO_MORE_DATA)
+			//{
+			//	DisplayError(r, "vpctx_dev_fifopnof failed");
+			//}
+
+			// 给 pno_1 和 pno_2 赋默认值：pos=0, ori=单位四元数
+			pno_1.pos[0] = 0;  pno_1.pos[1] = 0;  pno_1.pos[2] = 0;
+			pno_1.ori[0] = 0;  pno_1.ori[1] = 0;  pno_1.ori[2] = 0;  pno_1.ori[3] = 1;
+
+			pno_2.pos[0] = 0;  pno_2.pos[1] = 0;  pno_2.pos[2] = 0;
+			pno_2.ori[0] = 0;  pno_2.ori[1] = 0;  pno_2.ori[2] = 0;  pno_2.ori[3] = 1;
 		}
 		else
 		{
 			// 2) 检查 f.uiSize 是否有数据
 			if (f.uiSize > 0 && f.pF != nullptr)
 			{
-				// f.ts 就是时间戳(微秒级或根据 Polhemus 版本) 
+				// f.ts 就是时间戳(微秒级或根据 Polhemus 版本)
 				// 只有 wantTimestamp = true 时才有意义
-				uint64_t timestamp = f.ts;
+				uint64_t ViperTimestamp = f.ts;
 
 				// 3) 解析传感器数据
-				//    例如 pno_1 = GrabFramePNO((MYPNOTYPE*)f.pF, 0);
-				//    pno_2 = GrabFramePNO((MYPNOTYPE*)f.pF, 1);
 				if ((MYPNOTYPE*)&(f.pF)[0])
 				{
 					// a) Sensor1 (cylinderBot)
 					pno_1 = GrabFramePNO((MYPNOTYPE*)&(f.pF)[0], 0);
-					double scale = 0.1; // cm->m
+					double scale = 0.01; // cm->m
 					cVector3d curPos1(
 						pno_1.pos[0] * scale,
 						pno_1.pos[1] * scale,
@@ -1324,9 +1283,8 @@ void updateHaptics(void)
 					cylinderTop->setLocalPos(relPos2);
 					cylinderTop->setLocalRot(r2);
 
-					// c) calculate relative positio  sensor2 
+					// c) 计算 sensor2 相对于 sensor1 的位置和姿态
 					PNODATA pno2_in_sensor1_frame = convertToSensor1Frame(pno_1, pno_2);
-
 
 					cVector3d sensor2RelPos(
 						pno2_in_sensor1_frame.pos[0] * scale,
@@ -1341,65 +1299,42 @@ void updateHaptics(void)
 					);
 					cMatrix3d r2_rel = quaternionToMatrix(q2_rel);
 
-
 					cVector3d shift(0.0, 0.3, 0.0);
 					cVector3d finalPosRel = shift + sensor2RelPos;
-					//cVector3d finalPosRel(0.0, 0.3, 0.0);
-
 					cylinderTopRel->setLocalPos(finalPosRel);
 					cylinderTopRel->setLocalRot(r2_rel);
 
-
-					//std::cout << "Result: \n";
-					//std::cout << "pos_rel_test: ("
-					//	<< pno2_in_sensor1_frame.pos[0] << ", "
-					//	<< pno2_in_sensor1_frame.pos[1] << ", "
-					//	<< pno2_in_sensor1_frame.pos[2] << "\r";
-					//std::cout << "q_rel_test: ("
-					//	<< result_test.ori[0] << ", "
-					//	<< result_test.ori[1] << ", "
-					//	<< result_test.ori[2] << ", "
-					//	<< result_test.ori[3] << ")\n";
-
-					//pno2_in_sensor1_frame.pos[0] * scale,
-					//	pno2_in_sensor1_frame.pos[1] * scale,
-					//	pno2_in_sensor1_frame.pos[2] * scale
-
-					if (recordSensorDataToCSV)  // 你自己定义的开关
+					// 如果需要记录传感器数据到CSV
+					if (recordSensorDataToCSV)
 					{
-						// 把 timestamp 转为字符串（单位可选 microseconds or seconds）
-						// 例如 double t_sec = (double)timestamp / 1e6;
-						// std::string timeStr = std::to_string(t_sec);
-						std::string timeStr = std::to_string((double)timestamp);
-
-						// 准备一个 row
+						// 拼装CSV行
+						std::string timeStr = std::to_string((double)ViperTimestamp);
 						std::vector<std::string> row;
-
-						// 1) 时间戳
 						row.push_back(timeStr);
 
-						// 2) Sensor1 pos
+						// Sensor1 pos
 						row.push_back(std::to_string(pno_1.pos[0]));
 						row.push_back(std::to_string(pno_1.pos[1]));
 						row.push_back(std::to_string(pno_1.pos[2]));
 
-						// 3) Sensor1 ori (注意顺序 w, x, y, z 或 x, y, z, w, 需确认)
+						// Sensor1 ori
 						row.push_back(std::to_string(pno_1.ori[0]));
 						row.push_back(std::to_string(pno_1.ori[1]));
 						row.push_back(std::to_string(pno_1.ori[2]));
 						row.push_back(std::to_string(pno_1.ori[3]));
 
-						// 4) Sensor2 pos
+						// Sensor2 pos
 						row.push_back(std::to_string(pno_2.pos[0]));
 						row.push_back(std::to_string(pno_2.pos[1]));
 						row.push_back(std::to_string(pno_2.pos[2]));
 
-						// 5) Sensor2 ori
+						// Sensor2 ori
 						row.push_back(std::to_string(pno_2.ori[0]));
 						row.push_back(std::to_string(pno_2.ori[1]));
 						row.push_back(std::to_string(pno_2.ori[2]));
 						row.push_back(std::to_string(pno_2.ori[3]));
-						// 6) Relative pos & ori (sensor2_in_sensor1_frame)
+
+						// Sensor2 in Sensor1 frame
 						row.push_back(std::to_string(pno2_in_sensor1_frame.pos[0]));
 						row.push_back(std::to_string(pno2_in_sensor1_frame.pos[1]));
 						row.push_back(std::to_string(pno2_in_sensor1_frame.pos[2]));
@@ -1409,59 +1344,83 @@ void updateHaptics(void)
 						row.push_back(std::to_string(pno2_in_sensor1_frame.ori[2]));
 						row.push_back(std::to_string(pno2_in_sensor1_frame.ori[3]));
 
-						// 调用已有的 CSV 写函数
 						writeToCSV(row);
 					}
-
-
 				}
 			}
+			// 如果 f.uiSize=0 或 f.pF=nullptr，也不会赋值 => pno_1, pno_2保持默认构造（若需要可再加一层保护）
 		}
-	
-		
-
-		/////////////////////////////////////////////////////////////////////////
-		// FRAME TRANS TEST
-		/////////////////////////////////////////////////////////////////////////	
-
-		//PNODATA sensor1_test, sensor2_test;
 
 
+	/////////////////////////////////////////////////////////////////////////
+	// Define Parameters for a fixed trajectory 
+    /////////////////////////////////////////////////////////////////////////
+		double radius = 0.5;
+		chai3d::cVector3d center(0.0, 0.0, 0);
+		double angularSpeed = 1; // 由主程序决定
+		double currentTime = getCurrentTime();
+		//std::cout << "Current time since program start: " << currentTime << " s" << std::endl;
+		// call tajectory generator to get a circal 
+		chai3d::cVector3d TrajTarget =
+			TrajectoryGenerator::getCircularTrajectory(radius, center, angularSpeed, currentTime);
 
-		//sensor1_test.pos[0] = 1; sensor1_test.pos[1] = 0; sensor1_test.pos[2] = 0;
-		//sensor1_test.ori[0] = 0; sensor1_test.ori[1] = 0; sensor1_test.ori[2] = 1; sensor1_test.ori[3] = 0;
-		//sensor2_test.pos[0] = 2; sensor2_test.pos[1] = 0; sensor2_test.pos[2] = 0;
-		//sensor2_test.ori[0] = 0; sensor2_test.ori[1] = 0; sensor2_test.ori[2] = 1; sensor2_test.ori[3] = 0;
+		sphereTarget->setLocalPos(TrajTarget);
 
-		//PNODATA result_test = convertToSensor1Frame(sensor1_test, sensor2_test);
 
-		//// Print out the result 
-		//std::cout << "Result: \n";
-		//std::cout << "pos_rel_test: ("
-		//	<< result_test.pos[0] << ", "
-		//	<< result_test.pos[1] << ", "
-		//	<< result_test.pos[2] << ")\n";
-		//std::cout << "q_rel_test: ("
-		//	<< result_test.ori[0] << ", "
-		//	<< result_test.ori[1] << ", "
-		//	<< result_test.ori[2] << ", "
-		//	<< result_test.ori[3] << ")\n";
+	/////////////////////////////////////////////////////////////////////////
+	/*
+	Control Algrithm Start
+	Control Soft robot
+	*/
+	/////////////////////////////////////////////////////////////////////////
+	// Arduino Pos to Pressure, TODO
+		proxyPos = tool->getDeviceLocalForce();
+		try
+		{
+			posMagnitude = proxyPos.length();
+			// Remap function for Jiaji
+			posMagnitude = (posMagnitude - 0) * (3 - 0) / (20 - 0) + 0;
+			proxyPos.normalize();
+		}
+		catch (const std::exception&)
+		{
+			cout << "Touch some thing" << endl;
+		}
 
-		/////////////////////////////////////////////////////////////////////////
-		//Print out raw pno data 
-		/////////////////////////////////////////////////////////////////////////
-		//cout << "pno_1: "
-		//	<< pno_1.pos[0] << ", " << pno_1.pos[1] << ", " << pno_1.pos[2] << ", "
-		//	<< pno_1.ori[0] << ", " << pno_1.ori[1] << ", " << pno_1.ori[2] << ", " << pno_1.ori[3] << endl;
+		try
+		{
+			// Spring Kp = 4  
+			//ResolvedRateControl.reachTarget(proxyPos * posMagnitude * 4 + ResolvedRateControl.m_initCoord);
+			ResolvedRateControl.reachTarget(TrajTarget + ResolvedRateControl.m_initCoord);
+			// 在 reachTarget 完成后，读取当前压力组合并打印
+			chai3d::cVector3d Current_pressure = ResolvedRateControl.getDevicePressure();
+			std::cout << "Current Pressure Combination: "
+				<< Current_pressure.str()  // str()可以把 cVector3d 转成字符串
+				<< std::endl;
 
-		//cout << "pno_2: "
-		//	<< pno_2.pos[0] << ", " << pno_2.pos[1] << ", " << pno_2.pos[2] << ", "
-		//	<< pno_2.ori[0] << ", " << pno_2.ori[1] << ", " << pno_2.ori[2] << ", " << pno_2.ori[3] << endl;
-		// 
-		//tool->setDeviceLocalPos(GrabFramePNO((MYPNOTYPE*)&(f.pF)[0], pSD, 1)/25.4);
-		//tool->setDeviceLocalPos(0,0.1,0.1);
+		}
+		catch (const std::exception& e)
+		{
+			cout << "Something is really wrong" << e.what() << endl;
+			ControlPCC ResolvedRateControl;
 
-		tool->updateFromDevice();
+		}
+		if (sendPosToArduino)
+		{
+			arduinoWriteData(1, test_pressure.str());
+		}
+		if (writeForceToCSV)
+		{
+			
+			cVector3d posData = tool->getDeviceLocalForce();
+			writeToCSV(std::vector<string> {
+				std::to_string(currentTime),
+					std::to_string(posData(0)),
+					std::to_string(posData(1)),
+					std::to_string(posData(2))
+			});
+		}
+		// ---------------------------Control End--------------------------------
 
 		// compute interaction forces
 		tool->computeInteractionForces();
@@ -1476,10 +1435,10 @@ void updateHaptics(void)
 		// get status of user switch
 		bool button = tool->getUserSwitch(0);
 
-		//
+		//----------------------------------------------------------------------
 		// STATE 1:
 		// Idle mode - user presses the user switch
-		//
+		//----------------------------------------------------------------------
 		if ((state == IDLE) && (button == true))
 		{
 			// check if at least one contact has occurred
@@ -1506,10 +1465,10 @@ void updateHaptics(void)
 			}
 		}
 
-		//
+		//----------------------------------------------------------------------
 		// STATE 2:
 		// Selection mode - operator maintains user switch enabled and moves object
-		//
+		//----------------------------------------------------------------------
 		else if ((state == SELECTION) && (button == true))
 		{
 			// compute new tranformation of object in global coordinates
@@ -1526,17 +1485,14 @@ void updateHaptics(void)
 			// set zero forces when manipulating objects
 			tool->setDeviceGlobalForce(0.0, 0.0, 0.0);
 		}
-
-		//
+		//----------------------------------------------------------------------
 		// STATE 3:
 		// Finalize Selection mode - operator releases user switch.
-		//
+        //----------------------------------------------------------------------
 		else
 		{
 			state = IDLE;
 		}
-
-
 		/////////////////////////////////////////////////////////////////////////
 		// FINALIZE
 		/////////////////////////////////////////////////////////////////////////
@@ -1571,7 +1527,7 @@ void openCSV(const std::string& filename)
 		return;
 	}
 	// 写表头（只要在第一次写时写一次即可）
-	csvFile << "Timestamp,"
+	csvFile << "ViperTimestamp,"
 		<< "S1_posX,S1_posY,S1_posZ,S1_oriW,S1_oriX,S1_oriY,S1_oriZ,"
 		<< "S2_posX,S2_posY,S2_posZ,S2_oriW,S2_oriX,S2_oriY,S2_oriZ,"
 		<< "Rel_posX,Rel_posY,Rel_posZ,Rel_oriW,Rel_oriX,Rel_oriY,Rel_oriZ\n";
@@ -1835,3 +1791,17 @@ PNODATA GrabFramePNO(MYPNOTYPE* pv, uint32_t s_index)
 	//cout << pno << endl;
 	return currentPNO;
 }
+
+
+//double getCurrentTime()
+//{
+//	// 用 static 变量保存程序启动时的时间点，
+//	// 这样每次调用 getCurrentTime() 都会以同一基准计算相对时间
+//	static const auto startTime = std::chrono::system_clock::now();
+//	auto now = std::chrono::system_clock::now();
+//	// 计算从 startTime 到现在的时间间隔
+//	auto duration = now - startTime;
+//	// 将间隔转换为以微秒为单位的 double 数值，再除以 1e6 得到秒数
+//	double seconds = std::chrono::duration_cast<std::chrono::duration<double, std::micro>>(duration).count() / 1e6;
+//	return seconds;
+//}
