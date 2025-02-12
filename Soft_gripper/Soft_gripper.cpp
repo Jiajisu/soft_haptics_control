@@ -285,8 +285,10 @@ cVector3d test_pressure{ 0,0,0 };
 //{
 //	return my_pressure;
 //}
+ 
+
 //------------------------------------------------------------------------------
-// DECLARED VARIABLES
+// DECLARED VARIABLES JJS
 //------------------------------------------------------------------------------
 
 
@@ -296,7 +298,9 @@ std::ofstream csvFile;
 bool recordSensorDataToCSV = false;  // toggle if record sensor value
 
 
-
+static const chai3d::cVector3d INIT_PRESSURE(20, 20, 20);
+static bool hasInitPress = false;
+cVector3d presCurr;
 
 //auto now{ std::chrono::system_clock::now() };
 //// Convert the time point to duration in microseconds
@@ -1389,14 +1393,73 @@ void updateHaptics(void)
 
 		try
 		{
+			//-----------------------------Open loop Control---------------------------
+		
+			//-----------------------------Internal iteration-------------------------
 			// Spring Kp = 4  
 			//ResolvedRateControl.reachTarget(proxyPos * posMagnitude * 4 + ResolvedRateControl.m_initCoord);
 			ResolvedRateControl.reachTarget(TrajTarget + ResolvedRateControl.m_initCoord);
-			// 在 reachTarget 完成后，读取当前压力组合并打印
+			//  reachTarget 
 			chai3d::cVector3d Current_pressure = ResolvedRateControl.getDevicePressure();
 			std::cout << "Current Pressure Combination: "
-				<< Current_pressure.str()  // str()可以把 cVector3d 转成字符串
+				<< Current_pressure.str()  // 
 				<< std::endl;
+			//-----------------------------External iteration-------------------------
+	
+			//if (!hasInitPress)
+			//{
+			//	presCurr = INIT_PRESSURE;  // (20, 20, 20)
+			//	hasInitPress = true;       //
+			//}
+			//cVector3d targetPos = TrajTarget + ResolvedRateControl.m_initCoord;
+			//auto result = ResolvedRateControl.updateMotion(presCurr, targetPos);
+
+
+			//chai3d::cVector3d newPos = result[0];
+			//chai3d::cVector3d newPressure = result[1];
+
+			//double error = (newPos - targetPos).length();
+			//if (error < 0.05)
+			//{
+			//	std::cout << "[INFO] Target Reached! Current Pressure: "
+			//		<< newPressure.str() << std::endl;
+
+			//}
+			//else
+			//{
+			//	presCurr = newPressure; // 
+			//}
+
+			//------------------------------Close loop Control---------------------------
+			//------------------------------P to L model---------------------------------
+			//if (!hasInitPress)
+			//{
+			//	presCurr = INIT_PRESSURE;  // (20, 20, 20)
+			//	hasInitPress = true;       //
+			//}
+			//cVector3d targetPos = TrajTarget + ResolvedRateControl.m_initCoord;
+			//auto result = ResolvedRateControl.CloseloopCotrol(presCurr, targetPos);
+
+
+			//chai3d::cVector3d newPos = result[0];
+			//chai3d::cVector3d newPressure = result[1];
+
+			//double error = (newPos - targetPos).length();
+			//if (error < 0.05)
+			//{
+			//	std::cout << "[INFO] Target Reached! Current Pressure: "
+			//		<< newPressure.str() << std::endl;
+
+			//}
+			//else
+			//{
+			//	presCurr = newPressure; // 
+			//}
+
+			
+			//------------------------------------PID------------------------------------
+
+
 
 		}
 		catch (const std::exception& e)
