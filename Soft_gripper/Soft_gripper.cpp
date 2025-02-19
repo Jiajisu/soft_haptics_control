@@ -862,6 +862,9 @@ int main(int argc, char* argv[])
 	world->addChild(axisX);
 	world->addChild(axisY);
 	world->addChild(axisZ);
+	// 加入到场景 (world) 或其它父节点
+
+
 
 	//--------------------------------------------------------------------------
 	// CREATE SHADERS
@@ -1203,6 +1206,27 @@ void updateHaptics(void)
 	// 将小球添加到场景
 	world->addChild(sphereTarget);
 
+	// generate targets on circles
+	//  1) r=3.5, center=(0,0,19.5)
+	//  2) r=5.0, center=(0,0,21.5)
+	//  3) r=3.0, center=(0,0,24.5)
+	std::vector<TrajectoryGenerator::CircleDefinition> circles = {
+		{0.035, chai3d::cVector3d(0.0, 0.0, 0.195)},
+		{0.050, chai3d::cVector3d(0.0, 0.0, 0.215)},
+		{0.030, chai3d::cVector3d(0.0, 0.0, 0.245)}
+	};
+
+	// number of traget points on the circle
+	int points = 12;
+
+
+	// 调用函数，得到一个二维容器
+	// outer.size()=3, each inner.size()=12
+	std::vector<std::vector<chai3d::cVector3d>> allCircles =
+		TrajectoryGenerator::generateMultipleCirclesPoints(circles, points);
+	cVector3d startPos(0.0, 0.0, 0);
+	double duration = 10.0;         // total movement time
+	chai3d::cVector3d PointOnCir = allCircles[2][4];
 
 	// simulation in now running
 	simulationRunning = true;
@@ -1352,32 +1376,43 @@ void updateHaptics(void)
 					}
 				}
 			}
-			// 如果 f.uiSize=0 或 f.pF=nullptr，也不会赋值 => pno_1, pno_2保持默认构造（若需要可再加一层保护）
 		}
 
 
 	/////////////////////////////////////////////////////////////////////////
 	// Define Parameters for a fixed trajectory 
     /////////////////////////////////////////////////////////////////////////
-		double radius = 0.5;
-		chai3d::cVector3d center(0.0, 0.0, 0);
-		double angularSpeed = 1; // 由主程序决定
+	//-----------------------------Demo: Generate a circular traj---------------------------
 		double currentTime = getCurrentTime();
-		//std::cout << "Current time since program start: " << currentTime << " s" << std::endl;
-		// call tajectory generator to get a circal 
-		chai3d::cVector3d TrajTarget =
-			TrajectoryGenerator::getCircularTrajectory(radius, center, angularSpeed, currentTime);
+	
+	    //double radius = 0.5;
+		//chai3d::cVector3d center(0.0, 0.0, 0);
+		//double angularSpeed = 1; 
+		////std::cout << "Current time since program start: " << currentTime << " s" << std::endl;
+		//// call tajectory generator to get a circal 
+		//chai3d::cVector3d TrajTarget =
+		//	TrajectoryGenerator::getCircularTrajectory(radius, center, angularSpeed, currentTime);
+		//sphereTarget->setLocalPos(TrajTarget);
+	//-----------------------------Gnerate a straight traj---------------------------
+
+
+
+		chai3d::cVector3d TrajTarget = TrajectoryGenerator::getTransitionPosition(
+			startPos,       // start point
+			PointOnCir,      // target point on the circle
+			currentTime,
+			duration
+		);
 
 		sphereTarget->setLocalPos(TrajTarget);
 
+			/////////////////////////////////////////////////////////////////////////
+			/*
+			Control Algrithm Start
+			Control Soft robot
+			*/
+			/////////////////////////////////////////////////////////////////////////
 
-	/////////////////////////////////////////////////////////////////////////
-	/*
-	Control Algrithm Start
-	Control Soft robot
-	*/
-	/////////////////////////////////////////////////////////////////////////
-	// Arduino Pos to Pressure, TODO
 		proxyPos = tool->getDeviceLocalForce();
 		try
 		{
@@ -1391,19 +1426,18 @@ void updateHaptics(void)
 			cout << "Touch some thing" << endl;
 		}
 
-		try
-		{
+
 			//-----------------------------Open loop Control---------------------------
 		
 			//-----------------------------Internal iteration-------------------------
-			// Spring Kp = 4  
-			//ResolvedRateControl.reachTarget(proxyPos * posMagnitude * 4 + ResolvedRateControl.m_initCoord);
-			ResolvedRateControl.reachTarget(TrajTarget + ResolvedRateControl.m_initCoord);
-			//  reachTarget 
-			chai3d::cVector3d Current_pressure = ResolvedRateControl.getDevicePressure();
-			std::cout << "Current Pressure Combination: "
-				<< Current_pressure.str()  // 
-				<< std::endl;
+			//// Spring Kp = 4  
+			////ResolvedRateControl.reachTarget(proxyPos * posMagnitude * 4 + ResolvedRateControl.m_initCoord);
+			//ResolvedRateControl.reachTarget(TrajTarget + ResolvedRateControl.m_initCoord);
+			////  reachTarget 
+			//chai3d::cVector3d Current_pressure = ResolvedRateControl.getDevicePressure();
+			//std::cout << "Current Pressure Combination: "
+			//	<< Current_pressure.str()  // 
+			//	<< std::endl;
 			//-----------------------------External iteration-------------------------
 	
 			//if (!hasInitPress)
@@ -1413,17 +1447,13 @@ void updateHaptics(void)
 			//}
 			//cVector3d targetPos = TrajTarget + ResolvedRateControl.m_initCoord;
 			//auto result = ResolvedRateControl.updateMotion(presCurr, targetPos);
-
-
 			//chai3d::cVector3d newPos = result[0];
 			//chai3d::cVector3d newPressure = result[1];
-
 			//double error = (newPos - targetPos).length();
 			//if (error < 0.05)
 			//{
-			//	std::cout << "[INFO] Target Reached! Current Pressure: "
+			//	std::cout << "Target Reached! Current Pressure: "
 			//		<< newPressure.str() << std::endl;
-
 			//}
 			//else
 			//{
@@ -1432,57 +1462,33 @@ void updateHaptics(void)
 
 			//------------------------------Close loop Control---------------------------
 			//------------------------------P to L model---------------------------------
-			//if (!hasInitPress)
-			//{
-			//	presCurr = INIT_PRESSURE;  // (20, 20, 20)
-			//	hasInitPress = true;       //
-			//}
-			//cVector3d targetPos = TrajTarget + ResolvedRateControl.m_initCoord;
-			//auto result = ResolvedRateControl.CloseloopCotrol(presCurr, targetPos);
+			if (!hasInitPress)
+			{
+				presCurr = INIT_PRESSURE;  // (20, 20, 20)
+				hasInitPress = true;       //
+			}
+			cVector3d targetPos = TrajTarget + ResolvedRateControl.m_initCoord;
+			auto result = ResolvedRateControl.updateMotionCloseLoop(targetPos, pno2_in_sensor1_frame);
+			chai3d::cVector3d newPos = result[0];
+			chai3d::cVector3d newPressure = result[1];
+			double error = (newPos - targetPos).length();
+			if (error < 0.05)
+			{
+				std::cout << "Target Reached! Current Pressure: "
+					<< newPressure.str() << std::endl;
+			}
+			else
+			{
+				presCurr = newPressure; // 
+			}
 
-
-			//chai3d::cVector3d newPos = result[0];
-			//chai3d::cVector3d newPressure = result[1];
-
-			//double error = (newPos - targetPos).length();
-			//if (error < 0.05)
-			//{
-			//	std::cout << "[INFO] Target Reached! Current Pressure: "
-			//		<< newPressure.str() << std::endl;
-
-			//}
-			//else
-			//{
-			//	presCurr = newPressure; // 
-			//}
 
 			
 			//------------------------------------PID------------------------------------
 
 
 
-		}
-		catch (const std::exception& e)
-		{
-			cout << "Something is really wrong" << e.what() << endl;
-			ControlPCC ResolvedRateControl;
 
-		}
-		if (sendPosToArduino)
-		{
-			arduinoWriteData(1, test_pressure.str());
-		}
-		if (writeForceToCSV)
-		{
-			
-			cVector3d posData = tool->getDeviceLocalForce();
-			writeToCSV(std::vector<string> {
-				std::to_string(currentTime),
-					std::to_string(posData(0)),
-					std::to_string(posData(1)),
-					std::to_string(posData(2))
-			});
-		}
 		// ---------------------------Control End--------------------------------
 
 		// compute interaction forces
@@ -1567,6 +1573,7 @@ void updateHaptics(void)
 	// exit haptics thread
 	simulationFinished = true;
 }
+
 
 //------------------------------------------------------------------------------
 void arduinoWriteData(unsigned int delay_time, string send_str)
