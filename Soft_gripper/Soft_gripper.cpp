@@ -596,8 +596,8 @@ int main(int argc, char* argv[])
 	world->addChild(camera);
 
 	// position and orient the camera
-	camera->set(cVector3d(2, 0, 1.5),    // camera position (eye)
-		cVector3d(0.0, 0.0, 0.5),    // lookat position (target)
+	camera->set(cVector3d(0.2, 0.05, 0.15),    // camera position (eye)
+		cVector3d(0.0, 0.0, 0.015),    // lookat position (target)
 		cVector3d(0.0, 0.0, 1.0));   // direction of the (up) vector
 
 	// set the near and far clipping planes of the camera
@@ -1176,8 +1176,8 @@ void updateHaptics(void)
 	cGenericObject* object = NULL;
 	cTransform tool_T_object;
 	//add top and bot cap
-	double radius = 0.1; // 12mm
-	double height = 0.1; // 3mm
+	double radius = 0.012; // 12mm
+	double height = 0.0035; // 3mm
 	cShapeCylinder* cylinderTop = new cShapeCylinder(radius, radius, height);
 	cShapeCylinder* cylinderBot = new cShapeCylinder(radius, radius, height);
 
@@ -1186,16 +1186,16 @@ void updateHaptics(void)
 
 	cylinderTop->m_material->setRed();
 
-	double relRadius = 0.05;
-	double relHeight = 0.05;
+	double relRadius = 0.012;
+	double relHeight = 0.0035;
 	cShapeCylinder* cylinderTopRel = new cShapeCylinder(relRadius, relRadius, relHeight);
 	world->addChild(cylinderTopRel);
 
 
 	cylinderTopRel->m_material->setGreenForest();
-	cylinderTopRel->setLocalPos(-0.5, 0.0, 0.0); // 先往 X 方向左移
+	cylinderTopRel->setLocalPos(-0.05, -0.05, 0.0); // 先往 X 方向左移
 
-	double sphereRadius = 0.05; // 小球半径 (可根据需要调整)
+	double sphereRadius = 0.0025; // 小球半径 (可根据需要调整)
 	cShapeSphere* sphereTarget = new cShapeSphere(sphereRadius);
 
 	// 设置材质或颜色
@@ -1211,9 +1211,9 @@ void updateHaptics(void)
 	//  2) r=5.0, center=(0,0,21.5)
 	//  3) r=3.0, center=(0,0,24.5)
 	std::vector<TrajectoryGenerator::CircleDefinition> circles = {
-		{0.035, chai3d::cVector3d(0.0, 0.0, 0.195)},
-		{0.050, chai3d::cVector3d(0.0, 0.0, 0.215)},
-		{0.030, chai3d::cVector3d(0.0, 0.0, 0.245)}
+		{0.0035, chai3d::cVector3d(0.0, 0.0, 0.0195)},
+		{0.0050, chai3d::cVector3d(0.0, 0.0, 0.0215)},
+		{0.0030, chai3d::cVector3d(0.0, 0.0, 0.0245)}
 	};
 
 	// number of traget points on the circle
@@ -1224,7 +1224,7 @@ void updateHaptics(void)
 	// outer.size()=3, each inner.size()=12
 	std::vector<std::vector<chai3d::cVector3d>> allCircles =
 		TrajectoryGenerator::generateMultipleCirclesPoints(circles, points);
-	cVector3d startPos(0.0, 0.0, 0);
+	cVector3d startPos(0.0, 0.0, 0.020);
 	double duration = 10.0;         // total movement time
 	chai3d::cVector3d PointOnCir = allCircles[2][4];
 
@@ -1327,7 +1327,7 @@ void updateHaptics(void)
 					);
 					cMatrix3d r2_rel = quaternionToMatrix(q2_rel);
 
-					cVector3d shift(0.0, 0.3, 0.0);
+					cVector3d shift(0.0, 0.03, 0.0);
 					cVector3d finalPosRel = shift + sensor2RelPos;
 					cylinderTopRel->setLocalPos(finalPosRel);
 					cylinderTopRel->setLocalRot(r2_rel);
@@ -1430,14 +1430,14 @@ void updateHaptics(void)
 			//-----------------------------Open loop Control---------------------------
 		
 			//-----------------------------Internal iteration-------------------------
-			//// Spring Kp = 4  
-			////ResolvedRateControl.reachTarget(proxyPos * posMagnitude * 4 + ResolvedRateControl.m_initCoord);
-			//ResolvedRateControl.reachTarget(TrajTarget + ResolvedRateControl.m_initCoord);
-			////  reachTarget 
-			//chai3d::cVector3d Current_pressure = ResolvedRateControl.getDevicePressure();
-			//std::cout << "Current Pressure Combination: "
-			//	<< Current_pressure.str()  // 
-			//	<< std::endl;
+			// Spring Kp = 4  
+			//ResolvedRateControl.reachTarget(proxyPos * posMagnitude * 4 + ResolvedRateControl.m_initCoord);
+			ResolvedRateControl.reachTarget(TrajTarget * 1000);
+			//  reachTarget 
+			chai3d::cVector3d Current_pressure = ResolvedRateControl.getDevicePressure();
+			std::cout << "Current Pressure Combination: "
+				<< Current_pressure.str()  // 
+				<< std::endl;
 			//-----------------------------External iteration-------------------------
 	
 			//if (!hasInitPress)
@@ -1445,7 +1445,7 @@ void updateHaptics(void)
 			//	presCurr = INIT_PRESSURE;  // (20, 20, 20)
 			//	hasInitPress = true;       //
 			//}
-			//cVector3d targetPos = TrajTarget + ResolvedRateControl.m_initCoord;
+			//cVector3d targetPos = TrajTarget * 1000;
 			//auto result = ResolvedRateControl.updateMotion(presCurr, targetPos);
 			//chai3d::cVector3d newPos = result[0];
 			//chai3d::cVector3d newPressure = result[1];
@@ -1462,25 +1462,25 @@ void updateHaptics(void)
 
 			//------------------------------Close loop Control---------------------------
 			//------------------------------P to L model---------------------------------
-			if (!hasInitPress)
-			{
-				presCurr = INIT_PRESSURE;  // (20, 20, 20)
-				hasInitPress = true;       //
-			}
-			cVector3d targetPos = TrajTarget + ResolvedRateControl.m_initCoord;
-			auto result = ResolvedRateControl.updateMotionCloseLoop(targetPos, pno2_in_sensor1_frame);
-			chai3d::cVector3d newPos = result[0];
-			chai3d::cVector3d newPressure = result[1];
-			double error = (newPos - targetPos).length();
-			if (error < 0.05)
-			{
-				std::cout << "Target Reached! Current Pressure: "
-					<< newPressure.str() << std::endl;
-			}
-			else
-			{
-				presCurr = newPressure; // 
-			}
+			//if (!hasInitPress)
+			//{
+			//	presCurr = INIT_PRESSURE;  // (20, 20, 20)
+			//	hasInitPress = true;       //
+			//}
+			//cVector3d targetPos = TrajTarget + ResolvedRateControl.m_initCoord;
+			//auto result = ResolvedRateControl.updateMotionCloseLoop(targetPos, pno2_in_sensor1_frame);
+			//chai3d::cVector3d newPos = result[0];
+			//chai3d::cVector3d newPressure = result[1];
+			//double error = (newPos - targetPos).length();
+			//if (error < 0.05)
+			//{
+			//	std::cout << "Target Reached! Current Pressure: "
+			//		<< newPressure.str() << std::endl;
+			//}
+			//else
+			//{
+			//	presCurr = newPressure; // 
+			//}
 
 
 			
