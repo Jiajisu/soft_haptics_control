@@ -56,237 +56,6 @@ bool fullscreen = false;
 // mirrored display
 bool mirroredDisplay = false;
 
-////------------------------------------------------------------------------------
-//// HAPTIC INVERSE KINEMATIC CLASS
-////------------------------------------------------------------------------------
-cVector3d test_pressure{ 0,0,0 };
-//class MatlabCalc
-//{
-//private:
-//	const int d;
-//	const double b;
-//	const double k;
-//	const double h_0;
-//
-//	cVector3d my_pressure;
-//	cVector3d my_pos;
-//	double delta_t;
-//	double tolerance;
-//	const int MAX_ITERS;
-//	const double EPSILON;
-//	const double MULTIPLIER;
-//public:
-//	MatlabCalc(/* args */);
-//	~MatlabCalc();
-//	void setTargetPos(cVector3d& new_target_pos);
-//	cVector3d calcForwardPressurePos(cVector3d& x);
-//	cVector3d calcForwardPressurePosInverse(cVector3d& x);
-//	cVector3d MatlabCalc::TaskToConfig();
-//	cVector3d forwardKinematic(cVector3d& pressure, bool pressure_flag); // true, input is press
-//	double calcKappa(cVector3d& length);
-//	double calcPhi(cVector3d& length);
-//	double calcTheta(cVector3d& length);
-//	cMatrix3d calcJacobian(cVector3d& length);
-//	vector<cVector3d> updateMotion(cVector3d& pressure, cVector3d& pos);
-//	void reachTarget(cVector3d& target_pos);
-//	cVector3d getDevicePressure();
-//	double heaviside(double var);
-//};
-//
-//MatlabCalc::MatlabCalc()
-//	: d(12),
-//	b(16.351),
-//	k(0.232),
-//	h_0(20),
-//	MAX_ITERS(5000),
-//	MULTIPLIER(0.2),
-//	EPSILON(1e-6),
-//	delta_t(0.02),
-//	tolerance(0.05),
-//	my_pressure{ 20, 20, 20 },
-//	my_pos{ 0, 0, 0 } // Initializing constants and other variables
-//{
-//
-//}
-//
-//
-//MatlabCalc::~MatlabCalc()
-//{
-//
-//}
-//double MatlabCalc::heaviside(double var)
-//{
-//	if (var < 0)
-//	{
-//		return 0;
-//	}
-//	else if (var > 0)
-//	{
-//		return 1;
-//	}
-//	else
-//	{
-//		return 0.5;
-//	}
-//}
-//
-//void MatlabCalc::setTargetPos(cVector3d& new_target_pos)
-//{
-//	my_pos = new_target_pos;
-//}
-//
-//cVector3d MatlabCalc::calcForwardPressurePos(cVector3d& x)
-//{
-//	// New modify
-//	size_t n{ 3 };
-//	cVector3d result;
-//	for (size_t i{ 0 }; i < 3; ++i)
-//	{
-//		result(i) = heaviside(x(i) - h_0) * (k * x(i) + b) + heaviside(h_0 - x(i)) * (k * x(i) + b);
-//	}
-//	return result;
-//
-//}
-//cVector3d MatlabCalc::calcForwardPressurePosInverse(cVector3d& x)
-//{
-//	// New modify
-//	size_t n{ 3 };
-//	cVector3d result;
-//	for (size_t i{ 0 }; i < 3; ++i)
-//	{
-//		result(i) = heaviside(x(i) - h_0) * (x(i) - b) / k + heaviside(h_0 - x(i)) * (x(i) - b) / k;
-//	}
-//	return result;
-//
-//}
-//double MatlabCalc::calcKappa(cVector3d& length)
-//{
-//	return 2 * sqrt(pow(length(0), 2) + pow(length(1), 2) + pow(length(2), 2)
-//		- length(0) * length(1) - length(1) * length(2) - length(0) * length(2))
-//		/ (d * (length(0) + length(1) + length(2)));
-//}
-//
-//double MatlabCalc::calcPhi(cVector3d& length)
-//{
-//	return atan2(sqrt(3) * (length(1) + length(2) - 2 * length(0)), 3 * (length(1) - length(2)));
-//}
-//
-//double MatlabCalc::calcTheta(cVector3d& length)
-//{
-//	return 2 * sqrt(pow(length(0), 2) + pow(length(1), 2) + pow(length(2), 2)
-//		- length(0) * length(1) - length(1) * length(2) - length(0) * length(2))
-//		/ (d * 3);
-//}
-//
-//cVector3d MatlabCalc::forwardKinematic(cVector3d& pressure, bool pressure_flag)
-//{
-//	cVector3d length = pressure;
-//
-//
-//	if (pressure_flag)
-//	{
-//		length = calcForwardPressurePos(pressure);
-//	}
-//
-//
-//	double phi = calcPhi(length);
-//	double theta = calcTheta(length);
-//	double kappa = calcKappa(length);
-//
-//	double x_out = cos(phi) * (1 - cos(theta)) / kappa;
-//	double y_out = sin(phi) * (1 - cos(theta)) / kappa;
-//	double z_out = sin(theta) / kappa;
-//
-//	return cVector3d(x_out, y_out, z_out);
-//}
-//
-//cMatrix3d MatlabCalc::calcJacobian(cVector3d& length)
-//{
-//	size_t n = 3;
-//	cMatrix3d J;
-//	J.identity();
-//	cVector3d l_perturbed = length;
-//	cVector3d origin = forwardKinematic(length, false);
-//	for (size_t i = 0; i < n; ++i)
-//	{
-//		l_perturbed = length;
-//		l_perturbed(i) += EPSILON;
-//
-//		cVector3d origin_perturbed = forwardKinematic(l_perturbed, false);
-//
-//		for (size_t j = 0; j < n; ++j)
-//		{
-//			J(j, i) = (origin_perturbed(j) - origin(j)) / EPSILON;
-//		}
-//	}
-//	return J;
-//}
-//
-//vector<cVector3d> MatlabCalc::updateMotion(cVector3d& pressure, cVector3d& pos)
-//{
-//	if (pressure(0) == pressure(1) && pressure(1) == pressure(2))
-//	{
-//		pressure(2) += 0.00001;
-//	}
-//	cVector3d current_pos = forwardKinematic(pressure, true);
-//	cVector3d current_length = calcForwardPressurePos(pressure);
-//	cMatrix3d J = calcJacobian(current_length);
-//	cMatrix3d J_inverse = J;
-//	J_inverse.invert();
-//	cVector3d error = pos - current_pos;
-//	cVector3d target_vel = error / error.length() * MULTIPLIER;
-//	cVector3d l_dot = J_inverse * target_vel;
-//	cVector3d new_length = current_length + l_dot * delta_t;
-//	cVector3d new_pos = forwardKinematic(new_length, false);
-//	cVector3d new_pressure = calcForwardPressurePosInverse(new_length);
-//	return { new_pos, new_pressure };
-//}
-//
-//void MatlabCalc::reachTarget(cVector3d& target_pos)
-//{
-//	size_t iter{ 0 };
-//	my_pressure = cVector3d(20, 20, 20);
-//	while (iter < MAX_ITERS)
-//	{
-//
-//		my_pos = updateMotion(my_pressure, target_pos)[0];
-//		test_pressure = updateMotion(my_pressure, target_pos)[1];
-//		double error = (my_pos - target_pos).length();
-//		if (error < tolerance)
-//		{
-//			// SAFETY CHECK
-//			for (size_t i{ 0 }; i < 3; ++i)
-//			{
-//				if (test_pressure(i) < 0)
-//				{
-//					test_pressure(i) = 0;
-//					//cout << "\rWaiting for acutating.." << flush;
-//				}
-//				if (test_pressure(i) >= 35)
-//				{
-//					test_pressure(i) = 35;
-//					//cout << "\rAxis " << i << "reached limitation" << flush;
-//				}
-//			}
-//			//cout << "\033[F\033[F\033[F";
-//			//cout << "Target Reached, iteration: " << iter << endl;
-//			//cout << "Input Position: " << my_pos << endl;
-//			//cout << "Input Pressure: " << test_pressure << endl;
-//			std::cout.flush();
-//			break;
-//		}
-//
-//		my_pressure = test_pressure;
-//		iter += 1;
-//	}
-//}
-////cVector3d MatlabCalc::TaskToConfig() {}
-//cVector3d MatlabCalc::getDevicePressure()
-//{
-//	return my_pressure;
-//}
- 
-
 //------------------------------------------------------------------------------
 // DECLARED VARIABLES JJS
 //------------------------------------------------------------------------------
@@ -296,9 +65,6 @@ cVector3d test_pressure{ 0,0,0 };
 // a file to store force
 std::ofstream csvFile;
 bool recordSensorDataToCSV = false;  // toggle if record sensor value
-
-
-static const chai3d::cVector3d INIT_PRESSURE(20, 20, 20);
 static bool hasInitPress = false;
 cVector3d presCurr;
 
@@ -1213,7 +979,7 @@ void updateHaptics(void)
 	std::vector<TrajectoryGenerator::CircleDefinition> circles = {
 		{0.0035, chai3d::cVector3d(0.0, 0.0, 0.0195)},
 		{0.0050, chai3d::cVector3d(0.0, 0.0, 0.0215)},
-		{0.0030, chai3d::cVector3d(0.0, 0.0, 0.0245)}
+		{0.0050, chai3d::cVector3d(0.0, 0.0, 0.0245)}
 	};
 
 	// number of traget points on the circle
@@ -1224,7 +990,7 @@ void updateHaptics(void)
 	// outer.size()=3, each inner.size()=12
 	std::vector<std::vector<chai3d::cVector3d>> allCircles =
 		TrajectoryGenerator::generateMultipleCirclesPoints(circles, points);
-	cVector3d startPos(0.0, 0.0, 0.020);
+	cVector3d startPos(0.0, 0.0, 0.028);
 	double duration = 10.0;         // total movement time
 	chai3d::cVector3d PointOnCir = allCircles[2][4];
 
@@ -1430,35 +1196,37 @@ void updateHaptics(void)
 			//-----------------------------Open loop Control---------------------------
 		
 			//-----------------------------Internal iteration-------------------------
-			// Spring Kp = 4  
-			//ResolvedRateControl.reachTarget(proxyPos * posMagnitude * 4 + ResolvedRateControl.m_initCoord);
-			ResolvedRateControl.reachTarget(TrajTarget * 1000);
-			//  reachTarget 
-			chai3d::cVector3d Current_pressure = ResolvedRateControl.getDevicePressure();
-			std::cout << "Current Pressure Combination: "
-				<< Current_pressure.str()  // 
-				<< std::endl;
+			//// Spring Kp = 4  
+			////ResolvedRateControl.reachTarget(proxyPos * posMagnitude * 4 + ResolvedRateControl.m_initCoord);
+			//ResolvedRateControl.reachTarget(TrajTarget * 1000);
+			////  reachTarget 
+			//chai3d::cVector3d Current_pressure = ResolvedRateControl.getDevicePressure();
+			//std::cout << "Current Pressure Combination: "
+			//	<< Current_pressure.str()  // 
+			//	<< std::endl;
 			//-----------------------------External iteration-------------------------
 	
-			//if (!hasInitPress)
-			//{
-			//	presCurr = INIT_PRESSURE;  // (20, 20, 20)
-			//	hasInitPress = true;       //
-			//}
-			//cVector3d targetPos = TrajTarget * 1000;
-			//auto result = ResolvedRateControl.updateMotion(presCurr, targetPos);
-			//chai3d::cVector3d newPos = result[0];
-			//chai3d::cVector3d newPressure = result[1];
-			//double error = (newPos - targetPos).length();
-			//if (error < 0.05)
-			//{
-			//	std::cout << "Target Reached! Current Pressure: "
-			//		<< newPressure.str() << std::endl;
-			//}
-			//else
-			//{
-			//	presCurr = newPressure; // 
-			//}
+			if (!hasInitPress)
+			{
+				presCurr = ResolvedRateControl.m_initPressure;  // (20, 20, 20)
+				hasInitPress = true;       //
+			}
+			cVector3d targetPos = TrajTarget * 1000;
+			auto result = ResolvedRateControl.updateMotion(presCurr, targetPos);
+			chai3d::cVector3d newPos = result[0];
+			chai3d::cVector3d newPressure = result[1];
+			double error = (newPos - targetPos).length();
+			if (error < 0.05)
+			{
+				std::cout << "Target Reached! Current Pressure: "
+					<< newPressure.str() << std::endl;
+			}
+			else
+			{
+				presCurr = newPressure; // 
+				std::cout << "Target NOT Reached! Current Pressure: "
+					<< targetPos.str() << std::endl;
+			}
 
 			//------------------------------Close loop Control---------------------------
 			//------------------------------P to L model---------------------------------
