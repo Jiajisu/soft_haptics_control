@@ -67,6 +67,9 @@ std::ofstream csvFile;
 bool recordSensorDataToCSV = false;  // toggle if record sensor value
 static bool hasInitPress = false;
 cVector3d presCurr;
+chai3d::cVector3d PressuretoArduino;
+int circleIndex = 2;
+int pointIndex = 6;
 
 //auto now{ std::chrono::system_clock::now() };
 //// Convert the time point to duration in microseconds
@@ -856,8 +859,17 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 	}
 	else if (a_key == GLFW_KEY_O)
 	{
-		openCSV("Jiaji_data");
-		cout << "CSV file is rdy for saving...Press K for writing force into it" << endl;
+		// 生成文件名，如 "Jiaji_data_2_6.csv"
+		std::string csvFilename = "Cir_"
+			+ std::to_string(circleIndex)
+			+ "_"
+			+ std::to_string(pointIndex)
+			+ ".csv";
+
+		// 调用 openCSV(...)，创建并写表头
+		openCSV(csvFilename);
+
+		std::cout << "CSV file is ready for saving...Press K to write force." << std::endl;
 	}
 	else if (a_key == GLFW_KEY_K)
 	{
@@ -926,6 +938,9 @@ void updateGraphics(void)
 	GLenum err = glGetError();
 	if (err != GL_NO_ERROR) cout << "Error: " << gluErrorString(err) << endl;
 
+
+
+
 }
 
 //------------------------------------------------------------------------------
@@ -979,7 +994,7 @@ void updateHaptics(void)
 	std::vector<TrajectoryGenerator::CircleDefinition> circles = {
 		{0.0035, chai3d::cVector3d(0.0, 0.0, 0.0195)},
 		{0.0050, chai3d::cVector3d(0.0, 0.0, 0.0215)},
-		{0.0050, chai3d::cVector3d(0.0, 0.0, 0.0245)}
+		{0.0060, chai3d::cVector3d(0.0, 0.0, 0.0275)}
 	};
 
 	// number of traget points on the circle
@@ -991,8 +1006,9 @@ void updateHaptics(void)
 	std::vector<std::vector<chai3d::cVector3d>> allCircles =
 		TrajectoryGenerator::generateMultipleCirclesPoints(circles, points);
 	cVector3d startPos(0.0, 0.0, 0.028);
-	double duration = 10.0;         // total movement time
-	chai3d::cVector3d PointOnCir = allCircles[2][4];
+	double duration = 15.0;         // total movement time
+
+	chai3d::cVector3d PointOnCir = allCircles[circleIndex][pointIndex];
 
 	// simulation in now running
 	simulationRunning = true;
@@ -1218,15 +1234,36 @@ void updateHaptics(void)
 			double error = (newPos - targetPos).length();
 			if (error < 0.05)
 			{
-				std::cout << "Target Reached! Current Pressure: "
-					<< newPressure.str() << std::endl;
+				cVector3d PressuretoArduino = presCurr;
+				//cVector3d PressuretoArduino(20,20,20);
+				std::string sendStr = PressuretoArduino.str();
+				arduinoWriteData(100, sendStr);
+				std::cout << "sendStr: "
+					<< sendStr << "\r";
+				//std::ostringstream oss;
+				//oss << std::fixed << std::setprecision(1)
+				//	<< PressuretoArduino.x() << ","
+				//	<< PressuretoArduino.y() << ","
+				//	<< PressuretoArduino.z();
+				//std::string sendStr = oss.str();
+				//arduinoWriteData(1, sendStr);
+				//std::cout << "PressuretoArduino: " << sendStr << "\r";
 			}
 			else
 			{
 				presCurr = newPressure; // 
-				std::cout << "Target NOT Reached! Current Pressure: "
-					<< targetPos.str() << std::endl;
+
 			}
+
+			//if (sendPosToArduino)
+			//{
+			//	// 发送数据
+			//	std::string sendStr = PressuretoArduino.str();
+			//	arduinoWriteData(1, sendStr);
+			//	std::cout << "PressuretoArduino: "
+			//		<< PressuretoArduino.str() << std::endl;
+			//}
+
 
 			//------------------------------Close loop Control---------------------------
 			//------------------------------P to L model---------------------------------
