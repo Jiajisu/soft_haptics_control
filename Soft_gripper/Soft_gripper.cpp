@@ -1036,24 +1036,94 @@ void updateHaptics(void)
 		//  vpcmd_context g_ctx;   // 你的全局/外部变量
 		//  vpdev_hnd     g_hnd;   // 同上
 		int r = vpctx_dev_fifopnof(g_ctx, g_hnd, f);
-		if (r != 0)
+		// 	/////////////////////////////////////////////////////////////////////////
+	// Define Parameters for a fixed trajectory 
+    /////////////////////////////////////////////////////////////////////////
+	//-----------------------------Demo: Generate a circular traj---------------------------
+		double currentTime = getCurrentTime();
+	
+	    //double radius = 0.5;
+		//chai3d::cVector3d center(0.0, 0.0, 0);
+		//double angularSpeed = 1; 
+		////std::cout << "Current time since program start: " << currentTime << " s" << std::endl;
+		//// call tajectory generator to get a circal 
+		//chai3d::cVector3d TrajTarget =
+		//	TrajectoryGenerator::getCircularTrajectory(radius, center, angularSpeed, currentTime);
+		//sphereTarget->setLocalPos(TrajTarget);
+	//-----------------------------Gnerate a straight traj---------------------------
+
+
+
+		chai3d::cVector3d TrajTarget = TrajectoryGenerator::getTransitionPosition(
+			startPos,       // start point
+			PointOnCir,      // target point on the circle
+			currentTime,
+			duration
+		);
+
+		sphereTarget->setLocalPos(TrajTarget);
+
+
+		/////////////////////////////////////////////////////////////////////////
+		/*
+		Control Algrithm Start
+		Control Soft robot
+		*/
+		/////////////////////////////////////////////////////////////////////////
+
+		proxyPos = tool->getDeviceLocalForce();
+		try
 		{
-			// 如果返回 E_CTXERR_NO_MORE_DATA，说明当前还没有新帧可读
-			// 如果返回其他错误，也无法读取到有效数据
-			//if (r != E_CTXERR_NO_MORE_DATA)
-			//{
-			//	DisplayError(r, "vpctx_dev_fifopnof failed");
-			//}
-
-			// 给 pno_1 和 pno_2 赋默认值：pos=0, ori=单位四元数
-			pno_1.pos[0] = 0;  pno_1.pos[1] = 0;  pno_1.pos[2] = 0;
-			pno_1.ori[0] = 0;  pno_1.ori[1] = 0;  pno_1.ori[2] = 0;  pno_1.ori[3] = 1;
-
-			pno_2.pos[0] = 0;  pno_2.pos[1] = 0;  pno_2.pos[2] = 0;
-			pno_2.ori[0] = 0;  pno_2.ori[1] = 0;  pno_2.ori[2] = 0;  pno_2.ori[3] = 1;
+			posMagnitude = proxyPos.length();
+			// Remap function for Jiaji
+			posMagnitude = (posMagnitude - 0) * (3 - 0) / (20 - 0) + 0;
+			proxyPos.normalize();
 		}
-		else
+		catch (const std::exception&)
 		{
+			cout << "Touch some thing" << endl;
+		}
+
+
+		//-----------------------------Open loop Control---------------------------
+
+		//-----------------------------Internal iteration-------------------------
+		//// Spring Kp = 4  
+		////ResolvedRateControl.reachTarget(proxyPos * posMagnitude * 4 + ResolvedRateControl.m_initCoord);
+		//ResolvedRateControl.reachTarget(TrajTarget * 1000);
+		////  reachTarget 
+		//chai3d::cVector3d Current_pressure = ResolvedRateControl.getDevicePressure();
+		//std::cout << "Current Pressure Combination: "
+		//	<< Current_pressure.str()  // 
+		//	<< std::endl;
+		//-----------------------------External iteration-------------------------
+
+		//if (!hasInitPress)
+		//{
+		//	presCurr = ResolvedRateControl.m_initPressure;  // (20, 20, 20)
+		//	hasInitPress = true;       //
+		//}
+		//cVector3d targetPos = TrajTarget * 1000;
+		//auto result = ResolvedRateControl.updateMotion(presCurr, targetPos);
+		//chai3d::cVector3d newPos = result[0];
+		//chai3d::cVector3d newPressure = result[1];
+		//double error = (newPos - targetPos).length();
+		//if (error < 0.05)
+		//{
+		//	cVector3d PressuretoArduino = presCurr;
+		//	//cVector3d PressuretoArduino(20,20,20);
+		//	std::string sendStr = PressuretoArduino.str();
+		//	arduinoWriteData(100, sendStr);
+		//	std::cout << "sendStr: "
+		//		<< sendStr << "\r";
+		//}
+		//else
+		//{
+		//	presCurr = newPressure; // 
+
+		//}
+		// 
+		// 
 			// 2) 检查 f.uiSize 是否有数据
 			if (f.uiSize > 0 && f.pF != nullptr)
 			{
@@ -1061,18 +1131,19 @@ void updateHaptics(void)
 				// 只有 wantTimestamp = true 时才有意义
 				uint64_t ViperTimestamp = f.ts;
 
-				// 3) 解析传感器数据
-				if ((MYPNOTYPE*)&(f.pF)[0])
-				{
+				//// 3) 解析传感器数据
+				//if ((MYPNOTYPE*)&(f.pF)[0])
+				//{
 					// a) Sensor1 (cylinderBot)
 					pno_1 = GrabFramePNO((MYPNOTYPE*)&(f.pF)[0], 0);
-					double scale = 0.01; // cm->m
-					cVector3d curPos1(
-						pno_1.pos[0] * scale,
-						pno_1.pos[1] * scale,
-						pno_1.pos[2] * scale
+					double C3Dscale = 0.01; // cm->m
+					double Arcscale = 10; // cm->mm
+					cVector3d C3DPos1(
+						pno_1.pos[0] * C3Dscale,
+						pno_1.pos[1] * C3Dscale,
+						pno_1.pos[2] * C3Dscale
 					);
-					cVector3d relPos1 = curPos1 - g_posOffset;
+					cVector3d relPos1 = C3DPos1 - g_posOffset;
 					cQuaternion q1(pno_1.ori[0], pno_1.ori[1], pno_1.ori[2], pno_1.ori[3]);
 					cMatrix3d r1 = quaternionToMatrix(q1);
 
@@ -1081,12 +1152,12 @@ void updateHaptics(void)
 
 					// b) Sensor2 (cylinderTop)
 					pno_2 = GrabFramePNO((MYPNOTYPE*)&(f.pF)[0], 1);
-					cVector3d curPos2(
-						pno_2.pos[0] * scale,
-						pno_2.pos[1] * scale,
-						pno_2.pos[2] * scale
+					cVector3d C3DPos2(
+						pno_2.pos[0] * C3Dscale,
+						pno_2.pos[1] * C3Dscale,
+						pno_2.pos[2] * C3Dscale
 					);
-					cVector3d relPos2 = curPos2 - g_posOffset;
+					cVector3d relPos2 = C3DPos2 - g_posOffset;
 					cQuaternion q2(pno_2.ori[0], pno_2.ori[1], pno_2.ori[2], pno_2.ori[3]);
 					cMatrix3d r2 = quaternionToMatrix(q2);
 
@@ -1095,12 +1166,16 @@ void updateHaptics(void)
 
 					// c) 计算 sensor2 相对于 sensor1 的位置和姿态
 					PNODATA pno2_in_sensor1_frame = convertToSensor1Frame(pno_1, pno_2);
+					PNODATA sensor2RelPNOArc = pno2_in_sensor1_frame;
+					sensor2RelPNOArc.pos[0] *= Arcscale;
+					sensor2RelPNOArc.pos[1] *= Arcscale;
+					sensor2RelPNOArc.pos[2] *= Arcscale;
 
-					cVector3d sensor2RelPos(
-						pno2_in_sensor1_frame.pos[0] * scale,
-						pno2_in_sensor1_frame.pos[1] * scale,
-						pno2_in_sensor1_frame.pos[2] * scale
-					);
+					cVector3d sensor2RelPosC3D(
+						pno2_in_sensor1_frame.pos[0] * C3Dscale,
+						pno2_in_sensor1_frame.pos[1] * C3Dscale,
+						pno2_in_sensor1_frame.pos[2] * C3Dscale
+					);  
 					cQuaternion q2_rel(
 						pno2_in_sensor1_frame.ori[0],
 						pno2_in_sensor1_frame.ori[1],
@@ -1110,9 +1185,45 @@ void updateHaptics(void)
 					cMatrix3d r2_rel = quaternionToMatrix(q2_rel);
 
 					cVector3d shift(0.0, 0.03, 0.0);
-					cVector3d finalPosRel = shift + sensor2RelPos;
+					cVector3d finalPosRel = shift + sensor2RelPosC3D;
 					cylinderTopRel->setLocalPos(finalPosRel);
 					cylinderTopRel->setLocalRot(r2_rel);
+
+
+					//------------------------------Close loop Control---------------------------
+					//------------------------------P to L model---------------------------------
+
+
+					cVector3d targetPos = TrajTarget * 1000;
+
+					auto result = ResolvedRateControl.computeCurrArc(sensor2RelPNOArc, ResolvedRateControl.d);
+
+					chai3d::cVector3d newlength = result;
+						std::cout << "newlength: "
+				            << newlength.str() << std::endl;
+
+					//double error = (newPos - targetPos).length();
+					//if (error < 0.05)
+					//{
+					//	std::cout << "Reached! Current Pressure: "
+					//		<< newPressure.str() << std::endl;
+					//}
+					//else
+					//{
+					//	presCurr = newPressure; // 
+					//	std::cout << "NOT Reached! Current Pressure: "
+					//		<< newPressure.str() << std::endl;
+					//}
+
+
+					//------------------------------------PID------------------------------------
+
+
+
+
+				// ---------------------------Control End--------------------------------
+
+
 
 					// 如果需要记录传感器数据到CSV
 					if (recordSensorDataToCSV)
@@ -1156,128 +1267,15 @@ void updateHaptics(void)
 
 						writeToCSV(row);
 					}
-				}
+				
 			}
-		}
-
-
-	/////////////////////////////////////////////////////////////////////////
-	// Define Parameters for a fixed trajectory 
-    /////////////////////////////////////////////////////////////////////////
-	//-----------------------------Demo: Generate a circular traj---------------------------
-		double currentTime = getCurrentTime();
-	
-	    //double radius = 0.5;
-		//chai3d::cVector3d center(0.0, 0.0, 0);
-		//double angularSpeed = 1; 
-		////std::cout << "Current time since program start: " << currentTime << " s" << std::endl;
-		//// call tajectory generator to get a circal 
-		//chai3d::cVector3d TrajTarget =
-		//	TrajectoryGenerator::getCircularTrajectory(radius, center, angularSpeed, currentTime);
-		//sphereTarget->setLocalPos(TrajTarget);
-	//-----------------------------Gnerate a straight traj---------------------------
-
-
-
-		chai3d::cVector3d TrajTarget = TrajectoryGenerator::getTransitionPosition(
-			startPos,       // start point
-			PointOnCir,      // target point on the circle
-			currentTime,
-			duration
-		);
-
-		sphereTarget->setLocalPos(TrajTarget);
-
-			/////////////////////////////////////////////////////////////////////////
-			/*
-			Control Algrithm Start
-			Control Soft robot
-			*/
-			/////////////////////////////////////////////////////////////////////////
-
-		proxyPos = tool->getDeviceLocalForce();
-		try
-		{
-			posMagnitude = proxyPos.length();
-			// Remap function for Jiaji
-			posMagnitude = (posMagnitude - 0) * (3 - 0) / (20 - 0) + 0;
-			proxyPos.normalize();
-		}
-		catch (const std::exception&)
-		{
-			cout << "Touch some thing" << endl;
-		}
-
-
-			//-----------------------------Open loop Control---------------------------
 		
-			//-----------------------------Internal iteration-------------------------
-			//// Spring Kp = 4  
-			////ResolvedRateControl.reachTarget(proxyPos * posMagnitude * 4 + ResolvedRateControl.m_initCoord);
-			//ResolvedRateControl.reachTarget(TrajTarget * 1000);
-			////  reachTarget 
-			//chai3d::cVector3d Current_pressure = ResolvedRateControl.getDevicePressure();
-			//std::cout << "Current Pressure Combination: "
-			//	<< Current_pressure.str()  // 
-			//	<< std::endl;
-			//-----------------------------External iteration-------------------------
-	
-			if (!hasInitPress)
-			{
-				presCurr = ResolvedRateControl.m_initPressure;  // (20, 20, 20)
-				hasInitPress = true;       //
-			}
-			cVector3d targetPos = TrajTarget * 1000;
-			auto result = ResolvedRateControl.updateMotion(presCurr, targetPos);
-			chai3d::cVector3d newPos = result[0];
-			chai3d::cVector3d newPressure = result[1];
-			double error = (newPos - targetPos).length();
-			if (error < 0.05)
-			{
-				cVector3d PressuretoArduino = presCurr;
-				//cVector3d PressuretoArduino(20,20,20);
-				std::string sendStr = PressuretoArduino.str();
-				arduinoWriteData(100, sendStr);
-				std::cout << "sendStr: "
-					<< sendStr << "\r";
-			}
-			else
-			{
-				presCurr = newPressure; // 
-
-			}
-
-
-			//------------------------------Close loop Control---------------------------
-			//------------------------------P to L model---------------------------------
-			//if (!hasInitPress)
-			//{
-			//	presCurr = INIT_PRESSURE;  // (20, 20, 20)
-			//	hasInitPress = true;       //
-			//}
-			//cVector3d targetPos = TrajTarget + ResolvedRateControl.m_initCoord;
-			//auto result = ResolvedRateControl.updateMotionCloseLoop(targetPos, pno2_in_sensor1_frame);
-			//chai3d::cVector3d newPos = result[0];
-			//chai3d::cVector3d newPressure = result[1];
-			//double error = (newPos - targetPos).length();
-			//if (error < 0.05)
-			//{
-			//	std::cout << "Target Reached! Current Pressure: "
-			//		<< newPressure.str() << std::endl;
-			//}
-			//else
-			//{
-			//	presCurr = newPressure; // 
-			//}
-
-
-			
-			//------------------------------------PID------------------------------------
 
 
 
 
-		// ---------------------------Control End--------------------------------
+
+
 
 		// compute interaction forces
 		tool->computeInteractionForces();
