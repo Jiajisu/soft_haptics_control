@@ -69,7 +69,7 @@ static bool hasInitPress = false;
 cVector3d presCurr;
 chai3d::cVector3d PressuretoArduino;
 int circleIndex = 2;
-int pointIndex = 6;
+int pointIndex = 5;
 
 //auto now{ std::chrono::system_clock::now() };
 //// Convert the time point to duration in microseconds
@@ -1240,29 +1240,12 @@ void updateHaptics(void)
 				arduinoWriteData(100, sendStr);
 				std::cout << "sendStr: "
 					<< sendStr << "\r";
-				//std::ostringstream oss;
-				//oss << std::fixed << std::setprecision(1)
-				//	<< PressuretoArduino.x() << ","
-				//	<< PressuretoArduino.y() << ","
-				//	<< PressuretoArduino.z();
-				//std::string sendStr = oss.str();
-				//arduinoWriteData(1, sendStr);
-				//std::cout << "PressuretoArduino: " << sendStr << "\r";
 			}
 			else
 			{
 				presCurr = newPressure; // 
 
 			}
-
-			//if (sendPosToArduino)
-			//{
-			//	// 发送数据
-			//	std::string sendStr = PressuretoArduino.str();
-			//	arduinoWriteData(1, sendStr);
-			//	std::cout << "PressuretoArduino: "
-			//		<< PressuretoArduino.str() << std::endl;
-			//}
 
 
 			//------------------------------Close loop Control---------------------------
