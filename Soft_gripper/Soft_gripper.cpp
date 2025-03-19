@@ -69,8 +69,8 @@ static bool hasInitPress = false;
 cVector3d presCurr;
 chai3d::cVector3d PressuretoArduino;
 int circleIndex = 2;
-int pointIndex = 3;
-double duration = 3.0;         // total movement time
+int pointIndex = 11;
+double duration = 10.0;         // total movement time
 static bool g_doBoresight = false;
 static bool g_trajectoryStarted = false;
 static double g_trajectoryStartTime = 0.0;
