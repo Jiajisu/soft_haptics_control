@@ -69,7 +69,7 @@ static bool hasInitPress = false;
 cVector3d presCurr;
 chai3d::cVector3d PressuretoArduino;
 int circleIndex = 2;
-int pointIndex = 11;
+int pointIndex = 1;
 double duration = 10.0;         // total movement time
 static bool g_doBoresight = false;
 static bool g_trajectoryStarted = false;
@@ -700,13 +700,13 @@ int main(int argc, char* argv[])
 		DisplayError(rr, "vpcmd_dev_framerate GET");
 	}
 	else {
-		cfrate.frame_rate = FR_240;  // FR_30即枚举0,表示 30Hz
+		cfrate.frame_rate = FR_60;  // FR_30即枚举0,表示 30Hz
 		rr = vpcmd_dev_framerate(g_ctx, g_hnd, CMD_ACTION_SET, cfrate);
 		if (rr != 0) {
-			DisplayError(rr, "vpcmd_dev_framerate SET to 30Hz");
+			DisplayError(rr, "vpcmd_dev_framerate SET to 60Hz");
 		}
 		else {
-			std::cout << "Frame rate set to 30Hz.\n";
+			std::cout << "Frame rate set to 60Hz.\n";
 		}
 	}
 	config.pos_units = POS_CM;
@@ -724,14 +724,48 @@ int main(int argc, char* argv[])
 		DisplayError(r, "vpcmd_dev_contpno SET");
 	}
 
-	// 2) 设置为 FIFO 模式
-	//    有时你只需在全局定义 g_bFIFO = true; 并在后面调用 vpctx_dev_fifopnof
-	bool g_bFIFO = true; // 全局或局部的标志
-
 	// 3) 如果想要 Polhemus 给每帧打上时间戳，则启用 time-stamp
 	//    viper 提供 vpdev_tsenable(...) 
 	bool wantViperTimestamp = true;
 	vpdev_tsenable(g_ctx, g_hnd, wantViperTimestamp);
+
+
+	int sensorAll = VP_ID_ALL;  // = -1 => 对所有传感器生效
+
+	// a) 位置(Position)滤波 => Light
+	{
+		CFilterCfg filterLightPos;
+		filterLightPos.Fill(FILTER_LVL_LIGHT);
+		r = vpcmd_sns_filter(g_ctx, g_hnd, sensorAll, CMD_ACTION_SET, &filterLightPos, FILTER_TRGT_POS);
+		if (r != 0) {
+			DisplayError(r, "vpcmd_sns_filter (Light) for Position");
+		}
+	}
+
+	// b) 姿态(Orientation)滤波 => Light
+	{
+		CFilterCfg filterLightOri;
+		filterLightOri.Fill(FILTER_LVL_LIGHT);
+		r = vpcmd_sns_filter(g_ctx, g_hnd, sensorAll, CMD_ACTION_SET, &filterLightOri, FILTER_TRGT_ORI);
+		if (r != 0) {
+			DisplayError(r, "vpcmd_sns_filter (Light) for Orientation");
+		}
+	}
+
+	//-------------------------------------------
+	// 2) 打开预测滤波，并设参数为默认值(20ms 等)
+	//-------------------------------------------
+	{
+		PF_CONFIG predCfg;
+		memset(&predCfg, 0, sizeof(predCfg));
+		predCfg.qFil_on = 1;     // 开启姿态预测
+		predCfg.rFil_on = 1;     // 开启位置预测
+		predCfg.predTimeS = 0.02f; // 20毫秒
+		r = vpcmd_sns_predfilter(g_ctx, g_hnd, sensorAll, CMD_ACTION_SET, &predCfg);
+		if (r != 0) {
+			DisplayError(r, "vpcmd_sns_predfilter");
+		}
+	}
 
 
 	// setup callback when application exits
@@ -1023,8 +1057,8 @@ void updateHaptics(void)
 	//  2) r=5.0, center=(0,0,21.5)
 	//  3) r=3.0, center=(0,0,24.5)
 	std::vector<TrajectoryGenerator::CircleDefinition> circles = {
-		{0.0035, chai3d::cVector3d(0.0, 0.0, 0.0195)},
-		{0.0050, chai3d::cVector3d(0.0, 0.0, 0.0215)},
+		{0.004, chai3d::cVector3d(0.0, 0.0, 0.0310)},
+		{0.004, chai3d::cVector3d(0.0, 0.0, 0.024)},
 		{0.0060, chai3d::cVector3d(0.0, 0.0, 0.0275)}
 	};
 
@@ -1100,6 +1134,16 @@ void updateHaptics(void)
 			duration
 		);
 
+
+		//chai3d::cVector3d endPos(0, 0.00001, 0.033);
+
+		//chai3d::cVector3d TrajTarget = TrajectoryGenerator::getStraightLineTrajectory(
+		//	startPos,
+		//	endPos,
+		//	elapsedTime,
+		//	duration
+		//);
+
 		sphereTarget->setLocalPos(TrajTarget);
 
 
@@ -1160,7 +1204,7 @@ void updateHaptics(void)
 		//{
 		//	presCurr = newPressure; // 
 		//}
-		// 
+		 
 		// 
 			// 2) 检查 f.uiSize 是否有数据
 			if (f.uiSize > 0 && f.pF != nullptr)
@@ -1250,28 +1294,15 @@ void updateHaptics(void)
 					//------------------------------Close loop Control---------------------------
 					//------------------------------P to L model---------------------------------
 
-
-						//----------------------------------------------------
-						// 2) 计算目标位置 (Trajectory 轨迹目标)
-						//----------------------------------------------------
 					cVector3d targetPos = TrajTarget * 1000;  // 目标位置 (mm)
-					//----------------------------------------------------
-					// 3) 调用闭环控制逻辑，获取新的位置和压力
-					//----------------------------------------------------
 					if (g_enableControl)
 					{
 						auto result = ResolvedRateControl.updateMotionCloseLoop(targetPos, sensor2CrctPNOArc);
 						cVector3d newPos = result[0];       // 计算的新位置
 						cVector3d newPressure = result[1];  // 计算的新压力
-						//----------------------------------------------------
-						// 5) 计算当前误差
-						//----------------------------------------------------
 						double error = (newPos - targetPos).length();
 						//std::cout << "Error: " << error << " = " << newPos << " - " << targetPos << std::endl;
 						//std::cout << "newpos " << newPos << std::endl;
-						//----------------------------------------------------
-						// 6) 发送压力到 Arduino
-						//----------------------------------------------------
 					
 							//if (error < 1)
 							//{
@@ -1292,7 +1323,7 @@ void updateHaptics(void)
 						std::string sendZero = ZeroPressure.str();
 						arduinoWriteData(50, sendZero);
 					}
-					//------------------------------------PID------------------------------------
+			    //------------------------------------PID------------------------------------
 
 
 
@@ -1490,7 +1521,7 @@ void arduinoWriteData(unsigned int delay_time, const std::string& send_str)
 			}
 			// Then clamp to [-35, 35]
 			if (val < -35.0) val = -35.0;
-			if (val > 35.0) val = 35.0;
+			if (val > 40.0) val = 35.0;
 
 			values.push_back(val);
 		}

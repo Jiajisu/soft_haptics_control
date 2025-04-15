@@ -67,4 +67,24 @@ namespace TrajectoryGenerator {
         return (1.0 - alpha) * startPos + alpha * circlePos;
     }
 
+    chai3d::cVector3d getStraightLineTrajectory(
+        const chai3d::cVector3d& startPos,
+        const chai3d::cVector3d& endPos,
+        double currentTime,
+        double duration
+    )
+    {
+        // 计算插值系数 alpha，范围在 [0, 1]
+        double alpha = 0.0;
+        if (duration > 1e-9)
+        {
+            alpha = currentTime / duration;
+        }
+        if (alpha < 0.0) alpha = 0.0;
+        if (alpha > 1.0) alpha = 1.0;
+
+        // 利用线性插值进行位置计算
+        return (1.0 - alpha) * startPos + alpha * endPos;
+    }
+
 } // namespace TrajectoryGenerator
