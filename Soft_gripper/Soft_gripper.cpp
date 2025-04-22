@@ -719,10 +719,10 @@ int main(int argc, char* argv[])
 
 
 	// 1) 让 Polhemus 内部输出连续 PNO 数据
-	int r = vpcmd_dev_contpno(g_ctx, g_hnd, CMD_ACTION_SET);
-	if (r != 0) {
-		DisplayError(r, "vpcmd_dev_contpno SET");
-	}
+	//int r = vpcmd_dev_contpno(g_ctx, g_hnd, CMD_ACTION_SET);
+	//if (r != 0) {
+	//	DisplayError(r, "vpcmd_dev_contpno SET");
+	//}
 
 	// 3) 如果想要 Polhemus 给每帧打上时间戳，则启用 time-stamp
 	//    viper 提供 vpdev_tsenable(...) 
@@ -736,20 +736,16 @@ int main(int argc, char* argv[])
 	{
 		CFilterCfg filterLightPos;
 		filterLightPos.Fill(FILTER_LVL_LIGHT);
-		r = vpcmd_sns_filter(g_ctx, g_hnd, sensorAll, CMD_ACTION_SET, &filterLightPos, FILTER_TRGT_POS);
-		if (r != 0) {
-			DisplayError(r, "vpcmd_sns_filter (Light) for Position");
-		}
+		vpcmd_sns_filter(g_ctx, g_hnd, sensorAll, CMD_ACTION_SET, &filterLightPos, FILTER_TRGT_POS);
+
 	}
 
 	// b) 姿态(Orientation)滤波 => Light
 	{
 		CFilterCfg filterLightOri;
 		filterLightOri.Fill(FILTER_LVL_LIGHT);
-		r = vpcmd_sns_filter(g_ctx, g_hnd, sensorAll, CMD_ACTION_SET, &filterLightOri, FILTER_TRGT_ORI);
-		if (r != 0) {
-			DisplayError(r, "vpcmd_sns_filter (Light) for Orientation");
-		}
+		vpcmd_sns_filter(g_ctx, g_hnd, sensorAll, CMD_ACTION_SET, &filterLightOri, FILTER_TRGT_ORI);
+
 	}
 
 	//-------------------------------------------
@@ -761,10 +757,8 @@ int main(int argc, char* argv[])
 		predCfg.qFil_on = 1;     // 开启姿态预测
 		predCfg.rFil_on = 1;     // 开启位置预测
 		predCfg.predTimeS = 0.02f; // 20毫秒
-		r = vpcmd_sns_predfilter(g_ctx, g_hnd, sensorAll, CMD_ACTION_SET, &predCfg);
-		if (r != 0) {
-			DisplayError(r, "vpcmd_sns_predfilter");
-		}
+		vpcmd_sns_predfilter(g_ctx, g_hnd, sensorAll, CMD_ACTION_SET, &predCfg);
+
 	}
 
 
@@ -1057,9 +1051,9 @@ void updateHaptics(void)
 	//  2) r=5.0, center=(0,0,21.5)
 	//  3) r=3.0, center=(0,0,24.5)
 	std::vector<TrajectoryGenerator::CircleDefinition> circles = {
-		{0.004, chai3d::cVector3d(0.0, 0.0, 0.0310)},
+		{0.004, chai3d::cVector3d(0.0, 0.0, 0.032)},
 		{0.004, chai3d::cVector3d(0.0, 0.0, 0.024)},
-		{0.0060, chai3d::cVector3d(0.0, 0.0, 0.0275)}
+		{0.0060, chai3d::cVector3d(0.0, 0.0, 0.028)}
 	};
 
 	// number of traget points on the circle
@@ -1102,7 +1096,9 @@ void updateHaptics(void)
 		vpFrameInfo f;
 		//  vpcmd_context g_ctx;   // 你的全局/外部变量
 		//  vpdev_hnd     g_hnd;   // 同上
-		int r = vpctx_dev_fifopnof(g_ctx, g_hnd, f);
+		//vpctx_dev_fifopnof(g_ctx, g_hnd, f);
+		//READ LAST PNO DATA
+		 vpctx_dev_lastpnof(g_ctx, g_hnd, f);
 		// 	/////////////////////////////////////////////////////////////////////////
 	// Define Parameters for a fixed trajectory 
     /////////////////////////////////////////////////////////////////////////
@@ -1246,8 +1242,23 @@ void updateHaptics(void)
 					cylinderTop->setLocalPos(sensor2FinalPos);
 					cylinderTop->setLocalRot(r2);
 
+					PNODATA sensor1finalPNO = pno_1;          // 复制
+					sensor1finalPNO.pos[0] = relPos1.x() / C3Dscale; // 若保持 cm
+					sensor1finalPNO.pos[1] = relPos1.y() / C3Dscale;
+					sensor1finalPNO.pos[2] = relPos1.z() / C3Dscale;
+					PNODATA sensor2finalPNO = pno_2;          // 复制
+					sensor2finalPNO.pos[0] = sensor2FinalPos.x() / C3Dscale; // 若保持 cm
+					sensor2finalPNO.pos[1] = sensor2FinalPos.y() / C3Dscale;
+					sensor2finalPNO.pos[2] = sensor2FinalPos.z() / C3Dscale;
+
+
+
+					//std::cout << "relPos1 " << sensor1finalPNO.pos[0] << "   sensor2FinalPos: " << sensor1finalPNO.pos[0] << std::endl;
+
+
+
 					// c) 计算 sensor2 相对于 sensor1 的位置和姿态
-					PNODATA pno2_in_sensor1_frame = convertToSensor1Frame(pno_1, pno_2);
+					PNODATA pno2_in_sensor1_frame = convertToSensor1Frame(sensor1finalPNO, sensor2finalPNO);
 
 
 					cVector3d sensor2RelPosC3D(
@@ -1269,9 +1280,9 @@ void updateHaptics(void)
 					cylinderTopRel->setLocalRot(r2_rel);
 
 					PNODATA sensor2CrctPNOArc;
-					sensor2CrctPNOArc.pos[0] = sensor2FinalPos.x() * 1000; //mm
-					sensor2CrctPNOArc.pos[1] = sensor2FinalPos.y() * 1000;
-					sensor2CrctPNOArc.pos[2] = sensor2FinalPos.z() * 1000;
+					sensor2CrctPNOArc.pos[0] = pno2_in_sensor1_frame.pos[0] * 10; //mm
+					sensor2CrctPNOArc.pos[1] = pno2_in_sensor1_frame.pos[1] * 10;
+					sensor2CrctPNOArc.pos[2] = pno2_in_sensor1_frame.pos[2] * 10;
 					sensor2CrctPNOArc.ori[0] = pno2_in_sensor1_frame.ori[0];
 					sensor2CrctPNOArc.ori[1] = pno2_in_sensor1_frame.ori[1];
 					sensor2CrctPNOArc.ori[2] = pno2_in_sensor1_frame.ori[2];
@@ -1291,6 +1302,8 @@ void updateHaptics(void)
 						g_doBoresight = false;
 					}
 
+					std::cout <<  "   RELPos: " << sensor2CrctPNOArc.pos[0] << ", " << sensor2CrctPNOArc.pos[1] << ", " << sensor2CrctPNOArc.pos[2] << std::endl;
+
 					//------------------------------Close loop Control---------------------------
 					//------------------------------P to L model---------------------------------
 
@@ -1298,6 +1311,7 @@ void updateHaptics(void)
 					if (g_enableControl)
 					{
 						auto result = ResolvedRateControl.updateMotionCloseLoop(targetPos, sensor2CrctPNOArc);
+						//std::cout << "   RELPos: " << targetPos << "   RELPos: " << sensor2CrctPNOArc.pos[0] << ", " << sensor2CrctPNOArc.pos[1] << ", " << sensor2CrctPNOArc.pos[2] << std::endl;
 						cVector3d newPos = result[0];       // 计算的新位置
 						cVector3d newPressure = result[1];  // 计算的新压力
 						double error = (newPos - targetPos).length();

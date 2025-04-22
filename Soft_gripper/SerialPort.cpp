@@ -6,6 +6,16 @@
 */
 
 #include "SerialPort.hpp"
+#include "../../Dist64MT4/MTC.h"
+#ifdef _WIN32
+#include <windows.h>
+#endif
+//Macro to check for and report MTC usage errors.
+#define MTC(func) {int r = func; if (r!=mtOK) printf("MTC error: %s\n",MTLastErrorString()); };
+
+#ifdef WIN32
+int getMTHome(char* sMTHome, int size); //Forward declaration
+#endif
 
 SerialPort::SerialPort(const char *portName)
 {

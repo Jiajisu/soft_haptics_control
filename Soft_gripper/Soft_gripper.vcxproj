@@ -27,8 +27,10 @@
     <ClCompile Include="TrajectoryGenerator.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="..\..\Dist64MT4\MTC.h" />
     <ClInclude Include="ControlPCC.hpp" />
     <ClInclude Include="frameTrans.hpp" />
+    <ClInclude Include="MicronTrackerWrapper.hpp" />
     <ClInclude Include="SerialPort.hpp" />
     <ClInclude Include="TimeUtil.hpp" />
     <ClInclude Include="TrajectoryGenerator.hpp" />
@@ -144,7 +146,7 @@
     <ClCompile>
       <Optimization>Disabled</Optimization>
       <WholeProgramOptimization>false</WholeProgramOptimization>
-      <AdditionalIncludeDirectories>../../chai3d-3.2.0/src;../../chai3d-3.2.0/external/Eigen;../../chai3d-3.2.0/external/glew/include;../../chai3d-3.2.0/extras/GLFW/include;../../ViperPNOGrabberMI/Inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>../../chai3d-3.2.0/src;../../chai3d-3.2.0/external/Eigen;../../chai3d-3.2.0/external/glew/include;../../chai3d-3.2.0/extras/GLFW/include;../../ViperPNOGrabberMI/Inc;../../Dist64MT4;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>WIN64;_DEBUG;_CONSOLE;_MSVC;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <MinimalRebuild>false</MinimalRebuild>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
@@ -162,10 +164,10 @@
       <LinkLibraryDependencies>false</LinkLibraryDependencies>
     </ProjectReference>
     <Link>
-      <AdditionalDependencies>glfw.lib;OpenGL32.lib;glu32.lib;chai3d.lib;VPcmdif.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>glfw.lib;OpenGL32.lib;glu32.lib;chai3d.lib;VPcmdif.lib;MTC.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
       <SuppressStartupBanner>true</SuppressStartupBanner>
-      <AdditionalLibraryDirectories>../../chai3d-3.2.0/lib/$(Configuration)/$(Platform);../../chai3d-3.2.0/extras/glfw/lib/$(Configuration)/$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>../../chai3d-3.2.0/lib/$(Configuration)/$(Platform);../../chai3d-3.2.0/extras/glfw/lib/$(Configuration)/$(Platform);../../Dist64MT4;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <IgnoreSpecificDefaultLibraries>%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <ProgramDatabaseFile>$(TargetDir)$(TargetName).pdb</ProgramDatabaseFile>
