@@ -1,4 +1,4 @@
-Ôªø#pragma once
+#pragma once
 
 
 #include <vector>
@@ -15,18 +15,9 @@
 //Macro to check for and report MTC usage errors.
 #define MTC(func) {int r = func; if (r!=mtOK) printf("MTC error: %s\n",MTLastErrorString()); };
 
-//#ifdef WIN32
-//int getMTHome(char* sMTHome, int size); //Forward declaration
-//#endif
-
-
-#include <unordered_map>
-#include <stdexcept>
-#include <cstring>
-
 #ifdef _WIN32
 namespace {
-    // ËØªÂèñÊ≥®ÂÜåË°®ÔºöHKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment\MTHome
+    // ??????HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment\MTHome
     int getMTHome(char* buf, int bufSize)
     {
         LONG err;
@@ -49,15 +40,29 @@ namespace {
 #endif
 
 
+#include <unordered_map>
+#include <stdexcept>
+#include <cstring>
+
 namespace mtw {
 
     struct Pose
     {
-        double pos[3]{};   // millimetres (MicronTracker default)
-        double quat[4]{};  // (w,x,y,z) from Xform3D
+        double pos[3];   // ?? (mm)
+        double quat[4];  // ??? (w,x,y,z)
     };
 
-    // Helper that throws std::runtime_error on non‚ÄëmtOK return
+
+    // ???MicronTracker ???? (x,y,z,w)????? (w,x,y,z)
+    inline void toWxyz(double q[4])
+    {
+        std::swap(q[0], q[3]);          // (x,y,z,w) ? (w,y,z,x)
+        std::swap(q[1], q[3]);          // (w,x,z,y)
+        std::swap(q[2], q[3]);          // (w,x,y,z)
+    }
+
+
+    // Helper that throws std::runtime_error on non?mtOK return
     inline void check(mtCompletionCode cc, const char* fn)
     {
         if (cc != mtOK)
@@ -75,7 +80,7 @@ namespace mtw {
         }
 
         // -------------------------------------------------------------------
-        // Initialise ‚Äì will attach first available camera and load templates
+        // Initialise ñ will attach first available camera and load templates
         // -------------------------------------------------------------------
         void init(const std::string& mtHome = {})
         {
@@ -85,12 +90,16 @@ namespace mtw {
             std::string base = mtHome;
             if (base.empty())
             {
-            #ifdef _WIN32
+#ifdef _WIN32
                 char buf[512]{};
                 if (getMTHome(buf, sizeof(buf)) < 0)
-                    throw std::runtime_error("MTHome env var not set");
+                    throw std::runtime_error("MTHome env var not set in registry");
                 base = buf;
-            #endif
+#else
+                const char* env = std::getenv("MTHome");
+                if (!env) throw std::runtime_error("MTHome env var not set");
+                base = env;
+#endif
             }
             calibDir_ = base + "/CalibrationFiles";
             markerDir_ = base + "/Markers";
@@ -103,7 +112,7 @@ namespace mtw {
             // first camera handle
             check(Cameras_ItemGet(0, &currCam_), "Cameras_ItemGet");
 
-            // put camera in alternating/Dec41/14‚Äëbit (fast default)
+            // put camera in alternating/Dec41/14?bit (fast default)
             mtStreamingModeStruct mode{ mtFrameType::Alternating, mtDecimation::Dec41, mtBitDepth::Bpp14 };
             int serial{};  check(Camera_SerialNumberGet(currCam_, &serial), "Camera_SerialNumberGet");
             check(Cameras_StreamingModeSet(mode, serial), "Cameras_StreamingModeSet");
@@ -134,63 +143,80 @@ namespace mtw {
             return true;
         }
 
-        // retrieve pose of a template marker by name (in current‚Äëcamera coords)
-        bool getPose(const std::string& markerName, Pose& out)
+        /*-----------------------------------------------------------
+         * 1) ??? Marker ? ì???????î ?? Pose
+         *----------------------------------------------------------*/
+        bool getPose(mtHandle marker,          // Marker ??
+            mtHandle camera,          // ì??î Camera ??
+            Pose& out)
         {
-            if (!initialised_) return false;
-            check(Markers_IdentifiedMarkersGet(mtHandleNull, identifiedColl_), "Markers_IdentifiedMarkersGet");
+            bool wasId = false;
+            if (Marker_WasIdentifiedGet(marker, camera, &wasId) != mtOK || !wasId)
+                return false;                             // ?????????
 
-            int n = Collection_Count(identifiedColl_);
-            for (int i = 1; i <= n; ++i)
+            mtHandle xf = Xform3D_New();
+            mtHandle identifyingCam = 0;
+            if (Marker_Marker2CameraXfGet(marker, camera, xf, &identifyingCam) != mtOK ||
+                identifyingCam == 0)
             {
-                mtHandle mk = Collection_Int(identifiedColl_, i);
-                char name[MT_MAX_STRING_LENGTH]{};
-                check(Marker_NameGet(mk, name, sizeof(name), nullptr), "Marker_NameGet");
-                if (markerName == name)
-                {
-                    mtHandle identifyingCam{};
-                    check(Marker_Marker2CameraXfGet(mk, currCam_, poseXf_, &identifyingCam), "Marker_Marker2CameraXfGet");
-                    if (identifyingCam == 0) return false; // not in current camera frame
-
-                    check(Xform3D_ShiftGet(poseXf_, out.pos), "Xform3D_ShiftGet");
-                    check(Xform3D_RotQuaternionsGet(poseXf_, out.quat), "Xform3D_RotQuaternionsGet");
-                    // MicronTracker returns (x,y,z,w); convert to (w,x,y,z)
-                    std::swap(out.quat[0], out.quat[3]);
-                    return true;
-                }
+                Xform3D_Free(xf);
+                return false;                             // ??????????
             }
-            return false; // not found
-        }
 
-        // compute pose of marker2 expressed in marker1 frame
-        bool getRelativePose(const std::string& marker1, const std::string& marker2, Pose& out)
-        {
-            Pose p1, p2;
-            if (!getPose(marker1, p1) || !getPose(marker2, p2)) return false;
+            Xform3D_ShiftGet(xf, out.pos);                // mm
+            Xform3D_RotQuaternionsGet(xf, out.quat);      // (x,y,z,w)
+            toWxyz(out.quat);
 
-            // Build Xform3D for each, then concatenate inverse
-            mtHandle xf1 = Xform3D_New();
-            mtHandle xf2 = Xform3D_New();
-            mtHandle rel = Xform3D_New();
-
-            Xform3D_ShiftSet(xf1, p1.pos);
-            double q1[4] = { p1.quat[1], p1.quat[2], p1.quat[3], p1.quat[0] }; // back to (x,y,z,w)
-            Xform3D_RotQuaternionsSet(xf1, q1);
-
-            Xform3D_ShiftSet(xf2, p2.pos);
-            double q2[4] = { p2.quat[1], p2.quat[2], p2.quat[3], p2.quat[0] };
-            Xform3D_RotQuaternionsSet(xf2, q2);
-
-            Xform3D_Inverse(xf1, rel);
-            Xform3D_Concatenate(rel, xf2, rel);
-
-            check(Xform3D_ShiftGet(rel, out.pos), "Xform3D_ShiftGet rel");
-            double qRel[4];  check(Xform3D_RotQuaternionsGet(rel, qRel), "Xform3D_RotQuaternionsGet rel");
-            out.quat[0] = qRel[3]; out.quat[1] = qRel[0]; out.quat[2] = qRel[1]; out.quat[3] = qRel[2];
-
-            Xform3D_Free(xf1); Xform3D_Free(xf2); Xform3D_Free(rel);
+            Xform3D_Free(xf);
             return true;
         }
+
+        /*-----------------------------------------------------------
+         * 2) ? ìtarget ? reference ?????????î
+         *    ???   T_rel =  T_ref?π  ∑  T_tar
+         *----------------------------------------------------------*/
+        bool getRelativePose(mtHandle refMarker, mtHandle tarMarker,
+            mtHandle camera, Pose& out)
+        {
+            // ---------- ????? Marker?Camera ?? ----------
+            mtHandle ref2cam = Xform3D_New(), tar2cam = Xform3D_New();
+            mtHandle tmpCam = 0;
+
+            if (Marker_Marker2CameraXfGet(refMarker, camera, ref2cam, &tmpCam) != mtOK || tmpCam == 0 ||
+                Marker_Marker2CameraXfGet(tarMarker, camera, tar2cam, &tmpCam) != mtOK || tmpCam == 0)
+            {
+                Xform3D_Free(ref2cam);  Xform3D_Free(tar2cam);
+                return false;           // ????????????
+            }
+
+            // ---------- T_rel = ref?π * tar ----------
+            mtHandle refInv = Xform3D_New();
+            mtHandle relXf = Xform3D_New();
+            Xform3D_Inverse(ref2cam, refInv);             // ref?π
+            Xform3D_Concatenate(refInv, tar2cam, relXf);  // ref?π∑tar
+
+            // ---------- ??? ----------
+            Xform3D_ShiftGet(relXf, out.pos);
+            Xform3D_RotQuaternionsGet(relXf, out.quat);   // (x,y,z,w)
+            toWxyz(out.quat);
+
+            // ---------- ?? ----------
+            Xform3D_Free(ref2cam);  Xform3D_Free(tar2cam);
+            Xform3D_Free(refInv);   Xform3D_Free(relXf);
+            return true;
+        }
+
+
+
+
+
+#ifdef _WIN32
+        static int getMTHome(char* buf, int size)
+        {
+            DWORD len = GetEnvironmentVariableA("MTHome", buf, size);
+            return (len && len < size) ? 0 : -1;
+        }
+#endif
 
     private:
         bool initialised_ = false;

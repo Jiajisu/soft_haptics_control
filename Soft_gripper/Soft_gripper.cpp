@@ -25,6 +25,11 @@
 #include <iomanip>  // for std::setw
 #define POLHEMUS_VID 0x0f44
 #define VIPER_PID	0xBF01
+
+//------------------------------------------------------------------------------
+// MTW
+//------------------------------------------------------------------------------
+#include "MicronTrackerWrapper.hpp"
 //------------------------------------------------------------------------------
 using namespace chai3d;
 using namespace std;
@@ -36,6 +41,7 @@ using namespace std;
 #include "ControlPCC.hpp"
 #include "TrajectoryGenerator.hpp"
 #include "TimeUtil.hpp"
+
 
 //------------------------------------------------------------------------------
 // GENERAL SETTINGS
@@ -79,7 +85,7 @@ static double g_trajectoryStartTime = 0.0;
 bool g_enableControl = false;
 
 cVector3d ZeroPressure(0, 0, 0);
-
+static mtw::MicronTracker MT;
 
 //auto now{ std::chrono::system_clock::now() };
 //// Convert the time point to duration in microseconds
@@ -760,11 +766,20 @@ int main(int argc, char* argv[])
 		vpcmd_sns_predfilter(g_ctx, g_hnd, sensorAll, CMD_ACTION_SET, &predCfg);
 
 	}
+	//-------------------------------------------
+	// 2) Turn on micron tracker
+	//-------------------------------------------
+	try {
+		MT.init();         // 你在 main() 里只调一次
+		std::cout << "[MT] init OK\n";
+	}
+	catch (const std::exception& e) {
+		std::cerr << "[MT] init FAILED: " << e.what() << '\n';
 
+	}
 
 	// setup callback when application exits
 	atexit(close);
-
 
 	//--------------------------------------------------------------------------
 	// MAIN GRAPHIC LOOP
@@ -1099,9 +1114,48 @@ void updateHaptics(void)
 		//vpctx_dev_fifopnof(g_ctx, g_hnd, f);
 		//READ LAST PNO DATA
 		 vpctx_dev_lastpnof(g_ctx, g_hnd, f);
+
+		 // --- MicronTracker 更新 ----------------------------------------------------
+		 if (MT.update())          // 记得每帧都要 update() 让 MT 抓图+处理
+		 {
+			 mtw::Pose pAct, pFr, rel;
+			 bool okAct = MT.getPose("Actuator", pAct);
+			 bool okFr = MT.getPose("fr", pFr);
+
+			 if (okAct && okFr)
+			 {
+				 MT.getRelativePose("Actuator", "fr", rel);
+
+				 // ① 打印各自的绝对位置
+				 std::cout << std::fixed << std::setprecision(2);
+				 std::cout << "[MT] Act @ (" << pAct.pos[0] << ", "
+					 << pAct.pos[1] << ", "
+					 << pAct.pos[2] << ") mm | q = ("
+					 << pAct.quat[0] << ", "
+					 << pAct.quat[1] << ", "
+					 << pAct.quat[2] << ", "
+					 << pAct.quat[3] << ")\n";
+
+				 std::cout << "     fr  @ (" << pFr.pos[0] << ", "
+					 << pFr.pos[1] << ", "
+					 << pFr.pos[2] << ") mm | q = ("
+					 << pFr.quat[0] << ", "
+					 << pFr.quat[1] << ", "
+					 << pFr.quat[2] << ", "
+					 << pFr.quat[3] << ")\n";
+
+				 // ② 打印相对位姿
+				 std::cout << "     Act -> fr Δ = (" << rel.pos[0] << ", "
+					 << rel.pos[1] << ", "
+					 << rel.pos[2] << ") mm\n\n";
+			 }
+		 }
+
+
+
 		// 	/////////////////////////////////////////////////////////////////////////
-	// Define Parameters for a fixed trajectory 
-    /////////////////////////////////////////////////////////////////////////
+		// Define Parameters for a fixed trajectory 
+		/////////////////////////////////////////////////////////////////////////
 	//-----------------------------Demo: Generate a circular traj---------------------------
 		double absoluteTime = getCurrentTime();
 		double elapsedTime = 0.0;

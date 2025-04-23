@@ -20,6 +20,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="ControlPCC.cpp" />
+    <ClCompile Include="FileName.cpp" />
     <ClCompile Include="frameTrans.cpp" />
     <ClCompile Include="Soft_gripper.cpp" />
     <ClCompile Include="SerialPort.cpp" />
@@ -40,6 +41,7 @@
     <ProjectGuid>{A0FE2B56-6C50-4A6D-8FAA-CE094583CACD}</ProjectGuid>
     <RootNamespace>13-primitives</RootNamespace>
     <Keyword>Win32Proj</Keyword>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)/Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
@@ -91,7 +93,7 @@
     <OutDir Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">../../../bin/win-$(Platform)/</OutDir>
     <IntDir Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">obj/$(Configuration)/$(Platform)/</IntDir>
     <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</LinkIncremental>
-    <OutDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">../../../bin/win-$(Platform)/</OutDir>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">../$(Configuration)/$(Platform)/</OutDir>
     <IntDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">obj/$(Configuration)/$(Platform)/</IntDir>
     <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</LinkIncremental>
     <OutDir Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">../../../bin/win-$(Platform)/</OutDir>
