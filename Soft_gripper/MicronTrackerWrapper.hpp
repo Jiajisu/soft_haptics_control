@@ -1,46 +1,47 @@
-﻿#pragma once
+﻿// ============================================================================
+//  MicronTrackerWrapper.hpp   ―― 纯「位置 + 旋转矩阵」版本（不再使用四元数）
+// ============================================================================
+//
+//  * 依赖：MicronTracker SDK v4.x   (MTC.h + Dist64MT4 运行时)
+//  * 功能：
+//      -  后台线程抓帧 + 识别模板
+//      -  获取单个 marker 的位置 (mm) 与旋转矩阵 (行主序 3×3)
+//      -  计算 markerB 在 markerA 坐标系下的：
+//             - 相对位置   getRelPos()
+//             - 相对旋转   getRelRotMat()
+//
+//  注：全部数学运算都基于旋转矩阵；完全去除了四元数相关代码。
+// ============================================================================
 
+#pragma once
 
-#include <vector>
-#include <array>
-#include <iostream>
+#include <stdexcept>
+#include <string>
 #include "../../Dist64MT4/MTC.h"
-#include "string.h"
-#include "stdlib.h"
-#include <stdio.h>
+
 #ifdef _WIN32
-#include <windows.h>
+#   include <windows.h>
 #endif
 
-//Macro to check for and report MTC usage errors.
-#define MTC(func) {int r = func; if (r!=mtOK) printf("MTC error: %s\n",MTLastErrorString()); };
-
-//#ifdef WIN32
-//int getMTHome(char* sMTHome, int size); //Forward declaration
-//#endif
-
-
-#include <unordered_map>
-#include <stdexcept>
-#include <cstring>
+inline void mtCheck(mtCompletionCode cc, const char* fn)
+{
+    if (cc != mtOK)
+        throw std::runtime_error(std::string("MTC error in ") + fn + ": " + MTLastErrorString());
+}
 
 #ifdef _WIN32
 namespace {
-    // 读取注册表：HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment\MTHome
-    int getMTHome(char* buf, int bufSize)
+    int getMTHome(char* buf, int size)
     {
-        LONG err;
         HKEY key;
         constexpr const char* kName = "MTHome";
-        DWORD type = 0;
-        DWORD len = bufSize;
-
-        err = RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+        DWORD typ{}, len = size;
+        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
             "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment",
-            0, KEY_QUERY_VALUE, &key);
-        if (err != ERROR_SUCCESS) return -1;
+            0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS)
+            return -1;
 
-        err = RegQueryValueExA(key, kName, 0, &type,
+        auto err = RegQueryValueExA(key, kName, nullptr, &typ,
             reinterpret_cast<LPBYTE>(buf), &len);
         RegCloseKey(key);
         return (err == ERROR_SUCCESS && len > 1) ? 0 : -1;
@@ -48,158 +49,192 @@ namespace {
 }
 #endif
 
-
 namespace mtw {
 
     struct Pose
     {
-        double pos[3]{};   // millimetres (MicronTracker default)
-        double quat[4]{};  // (w,x,y,z) from Xform3D
+        double pos[3]{};
+        double rot[9]{};
     };
-
-    // Helper that throws std::runtime_error on non‑mtOK return
-    inline void check(mtCompletionCode cc, const char* fn)
-    {
-        if (cc != mtOK)
-            throw std::runtime_error(std::string("MTC error in ") + fn + ": " + MTLastErrorString());
-    }
 
     class MicronTracker
     {
     public:
         MicronTracker() = default;
-        ~MicronTracker()
-        {
-            try { Cameras_Detach(); }
-            catch (...) {}
-        }
+        ~MicronTracker() { try { Cameras_Detach(); } catch (...) {} }
+        double getFPS() const noexcept { return fps_; }
 
-        // -------------------------------------------------------------------
-        // Initialise – will attach first available camera and load templates
-        // -------------------------------------------------------------------
+
+
         void init(const std::string& mtHome = {})
         {
             if (initialised_) return;
-
-            // Resolve directories (CalibrationFiles / Markers)
             std::string base = mtHome;
             if (base.empty())
             {
-            #ifdef _WIN32
+#ifdef _WIN32
                 char buf[512]{};
-                if (getMTHome(buf, sizeof(buf)) < 0)
-                    throw std::runtime_error("MTHome env var not set");
+                if (getMTHome(buf, sizeof(buf)) != 0)
+                    throw std::runtime_error("Cannot locate MTHome (registry)");
                 base = buf;
-            #endif
+#else
+                const char* env = std::getenv("MTHome");
+                if (!env) throw std::runtime_error("Cannot locate MTHome (env var)");
+                base = env;
+#endif
             }
             calibDir_ = base + "/CalibrationFiles";
             markerDir_ = base + "/Markers";
 
-            // Attach cameras
-            check(Cameras_AttachAvailableCameras(calibDir_.c_str()), "Cameras_AttachAvailableCameras");
+            mtCheck(Cameras_AttachAvailableCameras(calibDir_.c_str()),
+                "Cameras_AttachAvailableCameras");
             if (Cameras_Count() < 1)
                 throw std::runtime_error("No MicronTracker camera found");
 
-            // first camera handle
-            check(Cameras_ItemGet(0, &currCam_), "Cameras_ItemGet");
+            mtCheck(Cameras_ItemGet(0, &cam_), "Cameras_ItemGet");
 
-            // put camera in alternating/Dec41/14‑bit (fast default)
-            mtStreamingModeStruct mode{ mtFrameType::Alternating, mtDecimation::Dec41, mtBitDepth::Bpp14 };
-            int serial{};  check(Camera_SerialNumberGet(currCam_, &serial), "Camera_SerialNumberGet");
-            check(Cameras_StreamingModeSet(mode, serial), "Cameras_StreamingModeSet");
+            mtStreamingModeStruct mode{
+                mtFrameType::Alternating,
+                mtDecimation::Dec41,
+                mtBitDepth::Bpp12
+            };
+            int serial{};
+            mtCheck(Camera_SerialNumberGet(cam_, &serial), "Camera_SerialNumberGet");
+            mtCheck(Cameras_StreamingModeSet(mode, serial), "Cameras_StreamingModeSet");
+            //-------------------------------------------------
+            // 4) PROI：中心 640×512
+            //-------------------------------------------------
 
-            // Load templates
-            check(Markers_LoadTemplates(const_cast<char*>(markerDir_.c_str())), "Markers_LoadTemplates");
+            //-------------------------------------------------
+            // 5) 固定曝光 & 可选 HDR
+            //-------------------------------------------------
 
-            identifiedColl_ = Collection_New();
-            poseXf_ = Xform3D_New();
+            mtCheck(Camera_AutoExposureSet(cam_, 0), "AutoExposure off");
+            mtCheck(Camera_ShutterMsecsSet(cam_, 3.0), "Shutter 3ms");
+            mtCheck(Camera_GainFSet(cam_, 1.0), "Gain 1.0");
 
+
+            mtCheck(Markers_LoadTemplates(const_cast<char*>(markerDir_.c_str())),
+                "Markers_LoadTemplates");
+
+            mtCheck(Markers_BackGroundProcessSet(true), "Markers_BackGroundProcessSet");
+
+            identColl_ = Collection_New();
+            xf_ = Xform3D_New();
+            // (2) 把所有已加载模板的 Kalman 打开
+            {
+                mtHandle coll = Collection_New();
+                mtCheck(Markers_TemplatesMarkersGet(coll), "TemplatesMarkersGet");
+
+                const int n = Collection_Count(coll);
+                for (int i = 1; i <= n; ++i)
+                {
+                    mtHandle mk = Collection_Int(coll, i);
+                    Marker_KalmanNoiseFilterEnabledSet(mk, true);   // per-marker 打开
+                    Marker_FilterNoiseCoeffSet(mk, cam_, 1);
+                }
+                Collection_Free(coll);
+            }
+
+            // (3) 可选：调 Jitter 参数（一次）
+            Markers_JitterFilterCoefficientSet(0.8);       // 0.0-1.0，越大越平滑
+            Markers_JitterFilterHistoryLengthSet(30);      // 历史帧长度
             initialised_ = true;
         }
 
-        // Grab + process a single frame (all cameras)
-        bool update(bool background = false)
+        bool update()
         {
             if (!initialised_) return false;
-
-            if (background)
+            mtCheck(Markers_GetIdentifiedMarkersFromBackgroundThread(cam_),
+                "Markers_GetIdentifiedMarkersFromBackgroundThread");
+            // ---- 计算 FPS ----
+            double ts{};
+            mtCheck(Camera_FrameMTTimeSecsGet(cam_, &ts), "FrameTimeSecsGet");
+            if (lastTs_ > 0.0)
             {
-                check(Markers_GetIdentifiedMarkersFromBackgroundThread(currCam_), "Markers_GetIdentifiedMarkersFromBackgroundThread");
+                const double dt = ts - lastTs_;
+                if (dt > 1e-6) fps_ = 1.0 / dt;   // Hz
             }
-            else
-            {
-                check(Cameras_GrabFrame(mtHandleNull), "Cameras_GrabFrame");
-                check(Markers_ProcessFrame(mtHandleNull), "Markers_ProcessFrame");
-            }
+            lastTs_ = ts;
+            
             return true;
         }
 
-        // retrieve pose of a template marker by name (in current‑camera coords)
-        bool getPose(const std::string& markerName, Pose& out)
+        bool getPoseAndRotMat(const std::string& markerName, Pose& out)
         {
-            if (!initialised_) return false;
-            check(Markers_IdentifiedMarkersGet(mtHandleNull, identifiedColl_), "Markers_IdentifiedMarkersGet");
+            if (!locateMarker(markerName)) return false;
+            mtCheck(Xform3D_ShiftGet(xf_, out.pos), "Xform3D_ShiftGet");
 
-            int n = Collection_Count(identifiedColl_);
-            for (int i = 1; i <= n; ++i)
-            {
-                mtHandle mk = Collection_Int(identifiedColl_, i);
-                char name[MT_MAX_STRING_LENGTH]{};
-                check(Marker_NameGet(mk, name, sizeof(name), nullptr), "Marker_NameGet");
-                if (markerName == name)
-                {
-                    mtHandle identifyingCam{};
-                    check(Marker_Marker2CameraXfGet(mk, currCam_, poseXf_, &identifyingCam), "Marker_Marker2CameraXfGet");
-                    if (identifyingCam == 0) return false; // not in current camera frame
+            double R[9];
+            mtCheck(Xform3D_RotMatGet(xf_, R), "Xform3D_RotMatGet");
 
-                    check(Xform3D_ShiftGet(poseXf_, out.pos), "Xform3D_ShiftGet");
-                    check(Xform3D_RotQuaternionsGet(poseXf_, out.quat), "Xform3D_RotQuaternionsGet");
-                    // MicronTracker returns (x,y,z,w); convert to (w,x,y,z)
-                    std::swap(out.quat[0], out.quat[3]);
-                    return true;
-                }
-            }
-            return false; // not found
+            // 转置（从 row-major 转 col-major）
+            out.rot[0] = R[0]; out.rot[1] = R[3]; out.rot[2] = R[6];
+            out.rot[3] = R[1]; out.rot[4] = R[4]; out.rot[5] = R[7];
+            out.rot[6] = R[2]; out.rot[7] = R[5]; out.rot[8] = R[8];
+            return true;
         }
 
-        // compute pose of marker2 expressed in marker1 frame
-        bool getRelativePose(const std::string& marker1, const std::string& marker2, Pose& out)
+        bool getRelPos(const std::string& markerA, const std::string& markerB, double outPos[3])
         {
-            Pose p1, p2;
-            if (!getPose(marker1, p1) || !getPose(marker2, p2)) return false;
+            Pose a, b;
+            if (!getPoseAndRotMat(markerA, a) || !getPoseAndRotMat(markerB, b))
+                return false;
 
-            // Build Xform3D for each, then concatenate inverse
-            mtHandle xf1 = Xform3D_New();
-            mtHandle xf2 = Xform3D_New();
-            mtHandle rel = Xform3D_New();
+            double dp[3]{ b.pos[0] - a.pos[0], b.pos[1] - a.pos[1], b.pos[2] - a.pos[2] };
+            outPos[0] = a.rot[0] * dp[0] + a.rot[3] * dp[1] + a.rot[6] * dp[2];
+            outPos[1] = a.rot[1] * dp[0] + a.rot[4] * dp[1] + a.rot[7] * dp[2];
+            outPos[2] = a.rot[2] * dp[0] + a.rot[5] * dp[1] + a.rot[8] * dp[2];
+            return true;
+        }
 
-            Xform3D_ShiftSet(xf1, p1.pos);
-            double q1[4] = { p1.quat[1], p1.quat[2], p1.quat[3], p1.quat[0] }; // back to (x,y,z,w)
-            Xform3D_RotQuaternionsSet(xf1, q1);
+        bool getRelRotMat(const std::string& markerA, const std::string& markerB, double outR[9])
+        {
+            Pose a, b;
+            if (!getPoseAndRotMat(markerA, a) || !getPoseAndRotMat(markerB, b))
+                return false;
 
-            Xform3D_ShiftSet(xf2, p2.pos);
-            double q2[4] = { p2.quat[1], p2.quat[2], p2.quat[3], p2.quat[0] };
-            Xform3D_RotQuaternionsSet(xf2, q2);
-
-            Xform3D_Inverse(xf1, rel);
-            Xform3D_Concatenate(rel, xf2, rel);
-
-            check(Xform3D_ShiftGet(rel, out.pos), "Xform3D_ShiftGet rel");
-            double qRel[4];  check(Xform3D_RotQuaternionsGet(rel, qRel), "Xform3D_RotQuaternionsGet rel");
-            out.quat[0] = qRel[3]; out.quat[1] = qRel[0]; out.quat[2] = qRel[1]; out.quat[3] = qRel[2];
-
-            Xform3D_Free(xf1); Xform3D_Free(xf2); Xform3D_Free(rel);
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    outR[r * 3 + c] =
+                    a.rot[0 * 3 + r] * b.rot[0 * 3 + c] +
+                    a.rot[1 * 3 + r] * b.rot[1 * 3 + c] +
+                    a.rot[2 * 3 + r] * b.rot[2 * 3 + c];
             return true;
         }
 
     private:
-        bool initialised_ = false;
-        mtHandle currCam_ = mtHandleNull;
-        mtHandle identifiedColl_ = mtHandleNull;
-        mtHandle poseXf_ = mtHandleNull;
+        double lastTs_{ 0.0 };   // 上一帧时间戳（秒）
+        double fps_{ 0.0 };      // 计算出的实时 FPS
 
-        std::string calibDir_;
-        std::string markerDir_;
+
+    private:
+        bool locateMarker(const std::string& name)
+        {
+            mtCheck(Markers_IdentifiedMarkersGet(mtHandleNull, identColl_),
+                "Markers_IdentifiedMarkersGet");
+            const int n = Collection_Count(identColl_);
+            for (int i = 1; i <= n; ++i)
+            {
+                mtHandle mk = Collection_Int(identColl_, i);
+                char buf[MT_MAX_STRING_LENGTH]{};
+                mtCheck(Marker_NameGet(mk, buf, sizeof(buf), nullptr), "Marker_NameGet");
+                if (name == buf)
+                {
+                    mtHandle idCam{};
+                    mtCheck(Marker_Marker2CameraXfGet(mk, cam_, xf_, &idCam), "Marker_Marker2CameraXfGet");
+                    return idCam != 0;
+                }
+            }
+            return false;
+        }
+
+    private:
+        bool initialised_{ false };
+        mtHandle cam_{ mtHandleNull };
+        mtHandle identColl_{ mtHandleNull };
+        mtHandle xf_{ mtHandleNull };
+        std::string calibDir_, markerDir_;
     };
 
-} // namespace mtw
+} // namespace mtw  

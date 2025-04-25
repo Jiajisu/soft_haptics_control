@@ -83,9 +83,36 @@ static double g_trajectoryStartTime = 0.0;
 // This accumulator persists across multiple calls to updateHaptics
 //static cVector3d pressureAccum(0.0, 0.0, 0.0);
 bool g_enableControl = false;
-
+bool g_doMTZero = false;
 cVector3d ZeroPressure(0, 0, 0);
 static mtw::MicronTracker MT;
+bool mtZeroMarkers(mtw::MicronTracker& MT, double h0_mm);
+
+/// mm → m，并把 3×3 行主序矩阵转成 cMatrix3d
+inline void mtPose2Chai(const double pos_mm[3],
+	const double Rrow[9],
+	cVector3d& p_out,
+	cMatrix3d& R_out)
+{
+	constexpr double s = 0.001;           // mm → m
+	p_out.set(pos_mm[0] * s, pos_mm[1] * s, pos_mm[2] * s);
+
+	R_out.set(Rrow[0], Rrow[1], Rrow[2],
+		Rrow[3], Rrow[4], Rrow[5],
+		Rrow[6], Rrow[7], Rrow[8]);
+}
+
+
+//--------------------------------------------------------------
+//  保存调零时抓到的基准
+//--------------------------------------------------------------
+struct MTZeroFrame
+{
+	double frPos[3]{}, frR[9]{};   // fr 在相机坐标
+	double actOffset[3]{};         // act 在 fr 坐标系下应扣除的量
+	bool   valid{ false };
+} g_mtZero;
+
 
 //auto now{ std::chrono::system_clock::now() };
 //// Convert the time point to duration in microseconds
@@ -769,15 +796,9 @@ int main(int argc, char* argv[])
 	//-------------------------------------------
 	// 2) Turn on micron tracker
 	//-------------------------------------------
-	try {
-		MT.init();         // 你在 main() 里只调一次
-		std::cout << "[MT] init OK\n";
-	}
-	catch (const std::exception& e) {
-		std::cerr << "[MT] init FAILED: " << e.what() << '\n';
+	MT.init();         // 你在 main() 里只调一次
 
-	}
-
+	//MT.zero(28);
 	// setup callback when application exits
 	atexit(close);
 
@@ -906,6 +927,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 	{
 		// call boresight sensor1
 		g_doBoresight = true;
+		g_doMTZero = true;
 		std::cout << "[INFO] boresight requested.\n";
 
 
@@ -1115,41 +1137,6 @@ void updateHaptics(void)
 		//READ LAST PNO DATA
 		 vpctx_dev_lastpnof(g_ctx, g_hnd, f);
 
-		 // --- MicronTracker 更新 ----------------------------------------------------
-		 if (MT.update())          // 记得每帧都要 update() 让 MT 抓图+处理
-		 {
-			 mtw::Pose pAct, pFr, rel;
-			 bool okAct = MT.getPose("Actuator", pAct);
-			 bool okFr = MT.getPose("fr", pFr);
-
-			 if (okAct && okFr)
-			 {
-				 MT.getRelativePose("Actuator", "fr", rel);
-
-				 // ① 打印各自的绝对位置
-				 std::cout << std::fixed << std::setprecision(2);
-				 std::cout << "[MT] Act @ (" << pAct.pos[0] << ", "
-					 << pAct.pos[1] << ", "
-					 << pAct.pos[2] << ") mm | q = ("
-					 << pAct.quat[0] << ", "
-					 << pAct.quat[1] << ", "
-					 << pAct.quat[2] << ", "
-					 << pAct.quat[3] << ")\n";
-
-				 std::cout << "     fr  @ (" << pFr.pos[0] << ", "
-					 << pFr.pos[1] << ", "
-					 << pFr.pos[2] << ") mm | q = ("
-					 << pFr.quat[0] << ", "
-					 << pFr.quat[1] << ", "
-					 << pFr.quat[2] << ", "
-					 << pFr.quat[3] << ")\n";
-
-				 // ② 打印相对位姿
-				 std::cout << "     Act -> fr Δ = (" << rel.pos[0] << ", "
-					 << rel.pos[1] << ", "
-					 << rel.pos[2] << ") mm\n\n";
-			 }
-		 }
 
 
 
@@ -1254,7 +1241,77 @@ void updateHaptics(void)
 		//{
 		//	presCurr = newPressure; // 
 		//}
-		 
+				 // --- MicronTracker 更新 ----------------------------------------------------
+
+
+		//MT.init();   // 只调一次
+		// ...
+		if (MT.update()) {
+			double pA[3], pB[3], RA[9], RB[9], relP[3];
+
+			mtw::Pose fr, act;
+			MT.getPoseAndRotMat("fr", fr);
+			MT.getPoseAndRotMat("Actuator", act);
+			
+				cVector3d posFr, posAct;
+				cMatrix3d rotFr, rotAct;
+
+
+
+
+				if (g_doMTZero)
+				{
+					const double h0_mm = 28.0;      // 末端初始 Z 目标
+					if (mtZeroMarkers(MT, h0_mm))
+						std::cout << "[MT] zero done\n";
+					g_doMTZero = false;
+				}
+
+				mtPose2Chai(fr.pos, fr.rot, posFr, rotFr);
+				mtPose2Chai(act.pos, act.rot, posAct, rotAct);
+
+				cylinderBot->setLocalPos(posFr);   cylinderBot->setLocalRot(rotFr);
+				cylinderTop->setLocalPos(posAct);  cylinderTop->setLocalRot(rotAct);
+			
+
+
+			//-------------------------------------------------------------------
+			// ③ 读取相对位置                        (camera frame → fr frame)
+			//-------------------------------------------------------------------
+
+				MT.getRelPos("Actuator", "fr", relP);
+			
+
+
+				//----------------------------------------------------------------
+				// ③-a  如果已经调零 → 减去 offset
+				//----------------------------------------------------------------
+				double relZero[3] = { relP[0], relP[1], relP[2] };
+				if (g_mtZero.valid)
+				{
+					relZero[0] -= g_mtZero.actOffset[0];
+					relZero[1] -= g_mtZero.actOffset[1];
+					relZero[2] -= g_mtZero.actOffset[2];
+				}
+				//----------------------------------------------------------------
+				// ③-b  打印
+				//----------------------------------------------------------------
+				std::cout << std::fixed << std::setprecision(2)
+					<< "[RelPos] fr w.r.t Actuator = ("
+					<< relZero[0] << ", " << relZero[1] << ", " << relZero[2]
+					<< ") mm    ";
+				//----------------------------------------------------------------
+				// ③-c  FPS 打印
+				//----------------------------------------------------------------
+				std::cout << "MicronTracker FPS = "
+					<< std::setprecision(1) << MT.getFPS() << " Hz\r";
+			
+
+
+
+
+
+		}
 		// 
 			// 2) 检查 f.uiSize 是否有数据
 			if (f.uiSize > 0 && f.pF != nullptr)
@@ -2033,3 +2090,56 @@ PNODATA GrabFramePNO(MYPNOTYPE* pv, uint32_t s_index)
 //	double seconds = std::chrono::duration_cast<std::chrono::duration<double, std::micro>>(duration).count() / 1e6;
 //	return seconds;
 //}
+
+
+
+// 将列主序( OpenGL-style )矩阵转成本函数需要的 row-major
+static inline void colToRow(const double C[9], double R[9])
+{
+	// C[i*3 + j]  =  行 j, 列 i
+	R[0] = C[0];  R[1] = C[3];  R[2] = C[6];
+	R[3] = C[1];  R[4] = C[4];  R[5] = C[7];
+	R[6] = C[2];  R[7] = C[5];  R[8] = C[8];
+}
+
+// --- 行向量乘 R^T -------------------------------------------------------------
+static inline void mulRT(const double R[9], const double v[3], double o[3])
+{
+	o[0] = R[0] * v[0] + R[3] * v[1] + R[6] * v[2];
+	o[1] = R[1] * v[0] + R[4] * v[1] + R[7] * v[2];
+	o[2] = R[2] * v[0] + R[5] * v[1] + R[8] * v[2];
+}
+
+// -----------------------------------------------------------------------------
+//  一键调零：让 fr 成为坐标原点；Actuator 的目标 (0,0,h0)
+// -----------------------------------------------------------------------------
+bool mtZeroMarkers(mtw::MicronTracker& MT, double h0_mm)
+{
+	// 1) 先抓一帧，确保 fr / Actuator 都被识别
+	if (!MT.update())
+	{
+		std::cerr << "[MT] update failed – cannot zero\n";
+		return false;
+	}
+
+	// 2) 当前 fr 相对于 Actuator 的位置 (mm)
+	double relNow[3];
+	if (!MT.getRelPos("Actuator", "fr", relNow))
+	{
+		std::cerr << "[MT] getRelPos(Actuator,fr) failed – cannot zero\n";
+		return false;
+	}
+
+	// 3) “本次偏移” =  Δp₀ − (0,0,h0)
+	g_mtZero.actOffset[0] = relNow[0];
+	g_mtZero.actOffset[1] = relNow[1];
+	g_mtZero.actOffset[2] = relNow[2] - h0_mm;
+
+	g_mtZero.valid = true;
+
+	std::cout << "[MT] zero done.  Offset = ("
+		<< g_mtZero.actOffset[0] << ", "
+		<< g_mtZero.actOffset[1] << ", "
+		<< g_mtZero.actOffset[2] << ") mm\n";
+	return true;
+}
