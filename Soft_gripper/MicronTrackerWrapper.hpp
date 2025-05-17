@@ -139,8 +139,15 @@ namespace mtw {
             // (3) 可选：调 Jitter 参数（一次）
             Markers_JitterFilterCoefficientSet(0.8);       // 0.0-1.0，越大越平滑
             Markers_JitterFilterHistoryLengthSet(30);      // 历史帧长度
+            
             initialised_ = true;
+
+
+
         }
+
+
+        inline double getLastTimestamp() const { return lastTs_; }
 
         bool update()
         {
@@ -196,10 +203,13 @@ namespace mtw {
 
             for (int r = 0; r < 3; ++r)
                 for (int c = 0; c < 3; ++c)
-                    outR[r * 3 + c] =
-                    a.rot[0 * 3 + r] * b.rot[0 * 3 + c] +
-                    a.rot[1 * 3 + r] * b.rot[1 * 3 + c] +
-                    a.rot[2 * 3 + r] * b.rot[2 * 3 + c];
+                {
+                    double v =
+                        a.rot[0 * 3 + r] * b.rot[0 * 3 + c] +
+                        a.rot[1 * 3 + r] * b.rot[1 * 3 + c] +
+                        a.rot[2 * 3 + r] * b.rot[2 * 3 + c];
+                    outR[c * 3 + r] = v;             // ★ 关键：写到 col-major 索引
+                }
             return true;
         }
 

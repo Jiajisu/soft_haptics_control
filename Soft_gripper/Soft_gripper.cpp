@@ -74,9 +74,9 @@ bool recordSensorDataToCSV = false;  // toggle if record sensor value
 static bool hasInitPress = false;
 cVector3d presCurr;
 chai3d::cVector3d PressuretoArduino;
-int circleIndex = 2;
-int pointIndex = 1;
-double duration = 10.0;         // total movement time
+int circleIndex = 1;
+int pointIndex = 0;
+double duration = 15.0;         // total movement time
 static bool g_doBoresight = false;
 static bool g_trajectoryStarted = false;
 static double g_trajectoryStartTime = 0.0;
@@ -87,6 +87,7 @@ bool g_doMTZero = false;
 cVector3d ZeroPressure(0, 0, 0);
 static mtw::MicronTracker MT;
 bool mtZeroMarkers(mtw::MicronTracker& MT, double h0_mm);
+PNODATA makePNO_mm_colRM(const double pos_mm[3], const double Rcol[9]);
 
 /// mm → m，并把 3×3 行主序矩阵转成 cMatrix3d
 inline void mtPose2Chai(const double pos_mm[3],
@@ -108,9 +109,20 @@ inline void mtPose2Chai(const double pos_mm[3],
 //--------------------------------------------------------------
 struct MTZeroFrame
 {
-	double frPos[3]{}, frR[9]{};   // fr 在相机坐标
-	double actOffset[3]{};         // act 在 fr 坐标系下应扣除的量
+	// --- fr 在相机坐标系下的零点姿态 ---
+	double frPos[3]{};
+	double frR[9]{};          // col-major
+
+	// --- Actuator 在相机坐标系下的零点姿态（可选，调试方便） ---
+	double actPos[3]{};
+	double actR[9]{};         // col-major
+
+	// --- Actuator 在 fr 坐标系下的“应扣除”量 ---
+	double relPosOff[3]{};    // (Δp₀ - (0,0,h₀))  ，单位 mm
+	double relROff[9]{};      // 相对旋转零点 (col-major)
+
 	bool   valid{ false };
+
 } g_mtZero;
 
 
@@ -438,10 +450,10 @@ int main(int argc, char* argv[])
 	light->setEnabled(true);
 
 	// position the light source
-	light->setLocalPos(2, 0, 1.5);
+	light->setLocalPos(2, 1, 1.5);
 
 	// define the direction of the light beam
-	light->setDir(-0.5, -0.5, -0.5);
+	light->setDir(0, 0, 0);
 
 	// enable this light source to generate shadows
 	light->setShadowMapEnabled(true);
@@ -481,7 +493,7 @@ int main(int argc, char* argv[])
 	tool->setWorkspaceRadius(1.0);
 
 	// define the radius of the tool (sphere)
-	double toolRadius = 0.0002;
+	double toolRadius = 0.002;
 
 	// define a radius for the tool
 	tool->setRadius(toolRadius);
@@ -536,18 +548,18 @@ int main(int argc, char* argv[])
 	cMesh* base = new cMesh();
 
 	// add object to world
-	//world->addChild(base);
+	world->addChild(base);
 
 	// build mesh using a cylinder primitive
 	cCreateCylinder(base,
-		0.01,
-		0.5,
+		0.001,
+		0.09,
 		36,
 		1,
 		10,
 		true,
 		true,
-		cVector3d(0.0, 0.0, -0.05),
+		cVector3d(0.0, 0.0, -0.001),
 		cMatrix3d(cDegToRad(0), cDegToRad(0), cDegToRad(0), C_EULER_ORDER_XYZ)
 	);
 
@@ -572,11 +584,11 @@ int main(int argc, char* argv[])
 	//world->addChild(box);
 
 	// build mesh using a cylinder primitive
-	cCreateBox(box, 0.3, 0.3, 0.1,
+	cCreateBox(box, 0.03, 0.03, 0.03,
 		cVector3d(-0.070, -0.020, 0.20), cIdentity3d(), cColorf(0, 1, 0));
 
 	// position object
-	box->setLocalPos(0.1, 0.0, 0.1);
+	box->setLocalPos(0.0, 0.0, 0);
 
 	// set material properties
 	box->m_material->setRed();
@@ -1053,24 +1065,26 @@ void updateHaptics(void)
 	cGenericObject* object = NULL;
 	cTransform tool_T_object;
 	//add top and bot cap
-	double radius = 0.012; // 12mm
-	double height = 0.0035; // 3mm
+	double radius = 0.005; // 12mm
+	double height = 0.001; // 3mm
 	cShapeCylinder* cylinderTop = new cShapeCylinder(radius, radius, height);
 	cShapeCylinder* cylinderBot = new cShapeCylinder(radius, radius, height);
 
-	world->addChild(cylinderTop);
+	//world->addChild(cylinderTop);
 	world->addChild(cylinderBot);
 
 	cylinderTop->m_material->setRed();
 
-	double relRadius = 0.012;
-	double relHeight = 0.0035;
+	//double relRadius = 0.012;
+	//double relHeight = 0.0035;
+	double relRadius = 0.005;
+	double relHeight = 0.001;
 	cShapeCylinder* cylinderTopRel = new cShapeCylinder(relRadius, relRadius, relHeight);
 	world->addChild(cylinderTopRel);
 
 
 	cylinderTopRel->m_material->setGreenForest();
-	cylinderTopRel->setLocalPos(-0.05, -0.05, 0.0); // 先往 X 方向左移
+	cylinderTopRel->setLocalPos(0, 0, 0.0); // 先往 X 方向左移
 
 	double sphereRadius = 0.0025; // 小球半径 (可根据需要调整)
 	cShapeSphere* sphereTarget = new cShapeSphere(sphereRadius);
@@ -1081,7 +1095,7 @@ void updateHaptics(void)
 	sphereTarget->setUseTransparency(true); // 启用透明效果
 
 	// 将小球添加到场景
-	world->addChild(sphereTarget);
+	//world->addChild(sphereTarget);
 
 	// generate targets on circles
 	//  1) r=3.5, center=(0,0,19.5)
@@ -1218,102 +1232,337 @@ void updateHaptics(void)
 		//	<< std::endl;
 		//-----------------------------External iteration-------------------------
 
-		//if (!hasInitPress)
-		//{
-		//	presCurr = ResolvedRateControl.m_initPressure;  // (20, 20, 20)
-		//	hasInitPress = true;       //
-		//}
-		//cVector3d targetPos = TrajTarget * 1000;
-		//auto result = ResolvedRateControl.updateMotion(presCurr, targetPos);
-		//chai3d::cVector3d newPos = result[0];
-		//chai3d::cVector3d newPressure = result[1];
-		//double error = (newPos - targetPos).length();
-		//if (error < 0.05)
-		//{
-		//	cVector3d PressuretoArduino = presCurr;
-		//	//cVector3d PressuretoArduino(20,20,20);
-		//	std::string sendStr = PressuretoArduino.str();
-		//	arduinoWriteData(100, sendStr);
-		//	std::cout << "sendStr: "
-		//		<< sendStr << "\r";
-		//}
-		//else
-		//{
-		//	presCurr = newPressure; // 
-		//}
-				 // --- MicronTracker 更新 ----------------------------------------------------
-
-
+		if (!hasInitPress)
+		{
+			presCurr = ResolvedRateControl.m_initPressure;  // (20, 20, 20)
+			hasInitPress = true;       //
+		}
+		cVector3d targetPos = TrajTarget * 1000;
+		auto result = ResolvedRateControl.updateMotion(presCurr, targetPos);
+		chai3d::cVector3d newPos = result[0];
+		chai3d::cVector3d newPressure = result[1];
+		double error = (newPos - targetPos).length();
+		if (error < 0.05)
+		{
+			cVector3d PressuretoArduino = presCurr;
+			//cVector3d PressuretoArduino(20,20,20);
+			std::string sendStr = PressuretoArduino.str();
+			arduinoWriteData(1, sendStr);
+			std::cout << "sendStr: "
+				<< sendStr << "\r";
+		}
+		else
+		{
+			presCurr = newPressure; // 
+		}
+		// --- MicronTracker 更新 ----------------------------------------------------
 		//MT.init();   // 只调一次
+		// 
 		// ...
-		if (MT.update()) {
-			double pA[3], pB[3], RA[9], RB[9], relP[3];
+		//------------------------------------------------------------
+		// 0) 采集新帧
+		//------------------------------------------------------------
+		if (!MT.update()) {
+			std::cerr << "[MT] update failed, skip\n";
+			continue;
+		}
 
-			mtw::Pose fr, act;
-			MT.getPoseAndRotMat("fr", fr);
-			MT.getPoseAndRotMat("Actuator", act);
-			
-				cVector3d posFr, posAct;
-				cMatrix3d rotFr, rotAct;
+		//------------------------------------------------------------
+		// 1) 读取 fr / Actuator 位姿，先检查返回值
+		//------------------------------------------------------------
+		mtw::Pose fr, act;
+		bool okFr = MT.getPoseAndRotMat("fr", fr);
+		bool okAct = MT.getPoseAndRotMat("Actuator", act);
+
+		if (!okFr) {                                    // 没有 fr → 本帧无效
+			std::cerr << " fr lost, skip frame\n";
+			continue;
+		}
+
+		//------------------------------------------------------------
+		// 2) 首次调零（只做一次）
+		//------------------------------------------------------------
+		if (g_doMTZero) {
+			const double h0_mm = 28.0;
+			if (mtZeroMarkers(MT, h0_mm))
+				std::cout << "[MT] zero done\n";
+			g_doMTZero = false;
+		}
+
+		//------------------------------------------------------------
+		// 3) 相对位姿（只有 okAct 时才计算）
+		//------------------------------------------------------------
+		double relPos[3] = { 0 }, relRot[9];        // 初始化
+		bool   okRel = false;
+
+		if (okAct &&
+			MT.getRelPos("Actuator", "fr", relPos) &&
+			MT.getRelRotMat("Actuator", "fr", relRot))
+		{
+			okRel = true;
+		}
+
+		//------------------------------------------------------------
+		// 4) 调零：位置（严格刚体变换） / 旋转
+		//------------------------------------------------------------
+		double frZeroPos[3];
+		double frRotZero[9];
+		double relZeroPos[3];
+		double relRotCorr[9];
+
+		// ----- fr的调零（严格刚体变换）-----
+		if (g_mtZero.valid) {
+			for (int r = 0; r < 3; ++r) {
+				frZeroPos[r] =
+					g_mtZero.frR[0 * 3 + r] * (fr.pos[0] - g_mtZero.frPos[0]) +
+					g_mtZero.frR[1 * 3 + r] * (fr.pos[1] - g_mtZero.frPos[1]) +
+					g_mtZero.frR[2 * 3 + r] * (fr.pos[2] - g_mtZero.frPos[2]);
+			}
+
+			for (int r = 0; r < 3; ++r)
+				for (int c = 0; c < 3; ++c)
+					frRotZero[c * 3 + r] =
+					g_mtZero.frR[0 * 3 + r] * fr.rot[0 * 3 + c] +
+					g_mtZero.frR[1 * 3 + r] * fr.rot[1 * 3 + c] +
+					g_mtZero.frR[2 * 3 + r] * fr.rot[2 * 3 + c];
+		}
+		else {
+			// 没有调零时保留原始值
+			for (int i = 0; i < 3; ++i) frZeroPos[i] = fr.pos[i];
+			for (int i = 0; i < 9; ++i) frRotZero[i] = fr.rot[i];
+		}
+
+		// ----- rel的调零（严格刚体变换）-----
+		if (okRel && g_mtZero.valid) {
+			for (int r = 0; r < 3; ++r) {
+				relZeroPos[r] =
+					g_mtZero.relROff[0 * 3 + r] * (relPos[0] - g_mtZero.relPosOff[0]) +
+					g_mtZero.relROff[1 * 3 + r] * (relPos[1] - g_mtZero.relPosOff[1]) +
+					g_mtZero.relROff[2 * 3 + r] * (relPos[2] - g_mtZero.relPosOff[2]);
+			}
+
+			for (int r = 0; r < 3; ++r)
+				for (int c = 0; c < 3; ++c)
+					relRotCorr[c * 3 + r] =
+					g_mtZero.relROff[0 * 3 + r] * relRot[0 * 3 + c] +
+					g_mtZero.relROff[1 * 3 + r] * relRot[1 * 3 + c] +
+					g_mtZero.relROff[2 * 3 + r] * relRot[2 * 3 + c];
+		}
+		else {
+			for (int i = 0; i < 3; ++i) relZeroPos[i] = relPos[i];
+			for (int i = 0; i < 9; ++i) relRotCorr[i] = relRot[i];
+		}
+
+
+
+		//------------------------------------------------------------
+		// 6) 渲染  (mm→m ×0.001)
+		//------------------------------------------------------------
+		// -- fr --
+		cVector3d posFrM(frZeroPos[0] * 0.001, frZeroPos[1] * 0.001, frZeroPos[2] * 0.001);
+		cMatrix3d rotFrM;
+		rotFrM.set(
+			frRotZero[0], frRotZero[3], frRotZero[6],
+			frRotZero[1], frRotZero[4], frRotZero[7],
+			frRotZero[2], frRotZero[5], frRotZero[8]);
+
+		//cylinderBot->setLocalPos(posFrM);
+
+		cylinderBot->setLocalPos(0, 0.107,  0.07);
+
+		cylinderBot->setLocalRot(rotFrM);
+		tool->setDeviceLocalPos(posFrM);
+		// -- rel (仅当 okRel && g_mtZero.valid) --
+		if (okRel && g_mtZero.valid)
+		{
+			cVector3d posRelM(relZeroPos[0] * 0.001,
+				relZeroPos[1] * 0.001,
+				relZeroPos[2] * 0.001);
+			posRelM += cVector3d(0, 0.1, 0.07);   // +3 cm 偏移
+
+			cMatrix3d rotRelM;
+			rotRelM.set(
+				relRotCorr[0], relRotCorr[3], relRotCorr[6],
+				relRotCorr[1], relRotCorr[4], relRotCorr[7],
+				relRotCorr[2], relRotCorr[5], relRotCorr[8]);
+
+			cylinderTopRel->setEnabled(true);
+			cylinderTopRel->setLocalPos(posRelM);
+			cylinderTopRel->setLocalRot(rotRelM);
+
+			PNODATA sensor2CrctPNO{};
+			if (okRel && g_mtZero.valid)
+			{
+				//double posRel[3] = { relPos[0], relPos[1], relPos[2] };   // mm
+				//double RRel[9] = { relRot[0], relRot[1], relRot[2],
+				//					 relRot[3], relRot[4], relRot[5],
+				//					 relRot[6], relRot[7], relRot[8] };
 
 
 
 
-				if (g_doMTZero)
+		//--------------------------------------------------------------------
+		// 7)  构造 PNODATA
+		//--------------------------------------------------------------------
+
+				 //---------- (1) pno_1  ← fr（原始，未调零） ----------
 				{
-					const double h0_mm = 28.0;      // 末端初始 Z 目标
-					if (mtZeroMarkers(MT, h0_mm))
-						std::cout << "[MT] zero done\n";
-					g_doMTZero = false;
+					double posFr[3] = { fr.pos[0], fr.pos[1], fr.pos[2] };       // mm
+					double RFr[9] = { fr.rot[0], fr.rot[1], fr.rot[2],
+										fr.rot[3], fr.rot[4], fr.rot[5],
+										fr.rot[6], fr.rot[7], fr.rot[8] };        // 列主序
+					pno_1 = makePNO_mm_colRM(posFr, RFr);
+				}
+				// ---------- (2) pno_2  ← act（若 okAct） ----------
+				if (okAct)
+				{
+					double posAct[3] = { act.pos[0], act.pos[1], act.pos[2] };   // mm
+					double RAct[9] = { act.rot[0], act.rot[1], act.rot[2],
+										 act.rot[3], act.rot[4], act.rot[5],
+										 act.rot[6], act.rot[7], act.rot[8] };
+					pno_2 = makePNO_mm_colRM(posAct, RAct);
 				}
 
-				mtPose2Chai(fr.pos, fr.rot, posFr, rotFr);
-				mtPose2Chai(act.pos, act.rot, posAct, rotAct);
-
-				cylinderBot->setLocalPos(posFr);   cylinderBot->setLocalRot(rotFr);
-				cylinderTop->setLocalPos(posAct);  cylinderTop->setLocalRot(rotAct);
-			
-
-
-			//-------------------------------------------------------------------
-			// ③ 读取相对位置                        (camera frame → fr frame)
-			//-------------------------------------------------------------------
-
-				MT.getRelPos("Actuator", "fr", relP);
-			
+				// ---------- (3) sensor2CrctPNOArc  ← 调零后的 rel ----------
+				double posRel[3] = { relZeroPos[0], relZeroPos[1], relZeroPos[2] };   // mm
+				double RRel[9] = { relRotCorr[0], relRotCorr[1], relRotCorr[2],
+									 relRotCorr[3], relRotCorr[4], relRotCorr[5],
+									 relRotCorr[6], relRotCorr[7], relRotCorr[8] };
 
 
-				//----------------------------------------------------------------
-				// ③-a  如果已经调零 → 减去 offset
-				//----------------------------------------------------------------
-				double relZero[3] = { relP[0], relP[1], relP[2] };
-				if (g_mtZero.valid)
-				{
-					relZero[0] -= g_mtZero.actOffset[0];
-					relZero[1] -= g_mtZero.actOffset[1];
-					relZero[2] -= g_mtZero.actOffset[2];
-				}
-				//----------------------------------------------------------------
-				// ③-b  打印
-				//----------------------------------------------------------------
-				std::cout << std::fixed << std::setprecision(2)
-					<< "[RelPos] fr w.r.t Actuator = ("
-					<< relZero[0] << ", " << relZero[1] << ", " << relZero[2]
-					<< ") mm    ";
-				//----------------------------------------------------------------
-				// ③-c  FPS 打印
-				//----------------------------------------------------------------
-				std::cout << "MicronTracker FPS = "
-					<< std::setprecision(1) << MT.getFPS() << " Hz\r";
-			
+				sensor2CrctPNO = makePNO_mm_colRM(posRel, RRel);
+			}
 
+
+			//std::cout << std::fixed << std::setprecision(2)
+			//	<< "[relZeroPos] (" << relZeroPos[0] << ", "
+			//	<< relZeroPos[1] << ", "
+			//	<< relZeroPos[2] << ") mm    "
+			//	<< "MicronTracker FPS = "
+			//	<< std::setprecision(1) << MT.getFPS() << " Hz\r";
+
+			//------------------------------P to L model---------------------------------
+
+			//cVector3d targetPos = TrajTarget * 1000;  // 目标位置 (mm)
+			//if (g_enableControl)
+			//{
+
+			//	//std::cout << std::fixed << std::setprecision(2)
+			//	//	<< "[sensor2CrctPNOArc] (" << sensor2CrctPNOArc.pos[0] << ", "
+			//	//	<< sensor2CrctPNOArc.pos[1] << ", "
+			//	//	<< sensor2CrctPNOArc.pos[2] << ") mm    "
+			//	//	<< "[targetPos] ( "
+			//	//	<< targetPos << " ) mm\r";
+			//	auto result = ResolvedRateControl.updateMotionCloseLoop(targetPos, sensor2CrctPNO);
+			//	if (!std::isfinite(frZeroPos[0])) {
+			//		std::cerr << " Invalid data detected, skip frame\n";
+			//		continue;
+			//	}
+			//	//std::cout << "   targetPos: " << targetPos << "   RELPos: " << sensor2CrctPNO.pos[0] << ", " << sensor2CrctPNO.pos[1] << ", " << sensor2CrctPNO.pos[2] << std::endl;
+			//	cVector3d newPos = result[0];       // 计算的新位置
+			//	cVector3d newPressure = result[1];  // 计算的新压力
+			//	double error = (newPos - targetPos).length();
+			//	//std::cout << "Error: " << error << " = " << newPos << " - " << targetPos << std::endl;
+			//	//std::cout << "newpos " << newPos << std::endl;
+
+			//		//if (error < 1)
+			//		//{
+			//	cVector3d PressuretoArduino = presCurr;
+			//	//cVector3d PressuretoArduino(20,20,20);
+			//	std::string sendStr = PressuretoArduino.str();
+			//	arduinoWriteData(50, sendStr);
+			//	//std::cout << "sendStr: "
+			//	//	<< sendStr << "\r";
+			////}
+			////else
+			////{
+			//	presCurr = newPressure; // 
+			//	//}
+			//}
+			else
+			{
+				std::string sendZero = ZeroPressure.str();
+				arduinoWriteData(50, sendZero);
+			}
+
+
+
+			if (recordSensorDataToCSV)
+			{
+				// ① 取 MicronTracker 时间戳（秒）
+				double ts = MT.getLastTimestamp();   // 秒
+				// ② 拼装 CSV 行
+				std::vector<std::string> row;
+				row.emplace_back(std::to_string(ts));                // 时间戳
+
+				// -- fr --
+				row.emplace_back(std::to_string(pno_1.pos[0]));
+				row.emplace_back(std::to_string(pno_1.pos[1]));
+				row.emplace_back(std::to_string(pno_1.pos[2]));
+				row.emplace_back(std::to_string(pno_1.ori[0]));
+				row.emplace_back(std::to_string(pno_1.ori[1]));
+				row.emplace_back(std::to_string(pno_1.ori[2]));
+				row.emplace_back(std::to_string(pno_1.ori[3]));
+
+				// -- Actuator --
+				row.emplace_back(std::to_string(pno_2.pos[0]));
+				row.emplace_back(std::to_string(pno_2.pos[1]));
+				row.emplace_back(std::to_string(pno_2.pos[2]));
+				row.emplace_back(std::to_string(pno_2.ori[0]));
+				row.emplace_back(std::to_string(pno_2.ori[1]));
+				row.emplace_back(std::to_string(pno_2.ori[2]));
+				row.emplace_back(std::to_string(pno_2.ori[3]));
+
+				// -- Rel (Act → fr) --
+				row.emplace_back(std::to_string(sensor2CrctPNO.pos[0]));
+				row.emplace_back(std::to_string(sensor2CrctPNO.pos[1]));
+				row.emplace_back(std::to_string(sensor2CrctPNO.pos[2]));
+				row.emplace_back(std::to_string(sensor2CrctPNO.ori[0]));
+				row.emplace_back(std::to_string(sensor2CrctPNO.ori[1]));
+				row.emplace_back(std::to_string(sensor2CrctPNO.ori[2]));
+				row.emplace_back(std::to_string(sensor2CrctPNO.ori[3]));
+
+				// ③ 写入
+				writeToCSV(row);
+			}
 
 
 
 
 		}
+		else
+		{
+			cylinderTopRel->setEnabled(false);      // 隐藏，避免用垃圾值渲染
+		}
+
+
+
+
+
+
+
+		//------------------------------------------------------------
+		// 5) 打印（可选）——确认调零后数值是否有限
+		//------------------------------------------------------------
+		//if (!std::isfinite(frZeroPos[0])) {
+		//	std::cerr << " Invalid data detected, skip frame\n";
+		//	continue;
+		//}
+
+
+		//std::cout << std::fixed << std::setprecision(2)
+		//	<< "[sensor2CrctPNOArc] (" << sensor2CrctPNO.pos[0] << ", "
+		//	<< sensor2CrctPNO.pos[1] << ", "
+		//	<< sensor2CrctPNO.pos[2] << ") mm   \r ";
+
+
+
+
+
+
 		// 
 			// 2) 检查 f.uiSize 是否有数据
+			/*
 			if (f.uiSize > 0 && f.pF != nullptr)
 			{
 				// f.ts 就是时间戳(微秒级或根据 Polhemus 版本)
@@ -1502,10 +1751,13 @@ void updateHaptics(void)
 				
 			}
 		
+			*/
 
+///////////////
 
+		//tool->setDeviceLocalPos(GrabFramePNO((MYPNOTYPE*)&(f.pF)[0], pSD, 1)/25.4);
 
-
+		//tool->updateFromDevice();
 
 
 
@@ -1682,6 +1934,25 @@ void openCSV(const std::string& filename)
 {
 	csvFile.open(filename, std::ios::app);
 	if (!csvFile.is_open()) {
+		std::cerr << "Unable to open file\n";
+		return;
+	}
+	// 只在文件为空时写表头
+	if (csvFile.tellp() == 0) {
+		csvFile << "MTTimestamp,"
+			<< "fr_posX,fr_posY,fr_posZ,fr_oriW,fr_oriX,fr_oriY,fr_oriZ,"
+			<< "act_posX,act_posY,act_posZ,act_oriW,act_oriX,act_oriY,act_oriZ,"
+			<< "rel_posX,rel_posY,rel_posZ,rel_oriW,rel_oriX,rel_oriY,rel_oriZ\n";
+		csvFile.flush();
+	}
+}
+
+/*
+
+void openCSV(const std::string& filename)
+{
+	csvFile.open(filename, std::ios::app);
+	if (!csvFile.is_open()) {
 		std::cerr << "Unable to open file" << std::endl;
 		return;
 	}
@@ -1692,7 +1963,7 @@ void openCSV(const std::string& filename)
 		<< "Rel_posX,Rel_posY,Rel_posZ,Rel_oriW,Rel_oriX,Rel_oriY,Rel_oriZ\n";
 	csvFile.flush();
 }
-
+*/
 
 // Function to write data to the open CSV file
 void writeToCSV(const std::vector<string>& row) {
@@ -2110,36 +2381,132 @@ static inline void mulRT(const double R[9], const double v[3], double o[3])
 	o[2] = R[2] * v[0] + R[5] * v[1] + R[8] * v[2];
 }
 
-// -----------------------------------------------------------------------------
-//  一键调零：让 fr 成为坐标原点；Actuator 的目标 (0,0,h0)
-// -----------------------------------------------------------------------------
 bool mtZeroMarkers(mtw::MicronTracker& MT, double h0_mm)
 {
-	// 1) 先抓一帧，确保 fr / Actuator 都被识别
+	// 1) 更新一帧，确保识别成功
 	if (!MT.update())
 	{
 		std::cerr << "[MT] update failed – cannot zero\n";
 		return false;
 	}
 
-	// 2) 当前 fr 相对于 Actuator 的位置 (mm)
-	double relNow[3];
-	if (!MT.getRelPos("Actuator", "fr", relNow))
+	// 2) 读取 fr / Actuator 的绝对姿态
+	mtw::Pose fr, act;
+	if (!MT.getPoseAndRotMat("fr", fr) ||
+		!MT.getPoseAndRotMat("Actuator", act))
+	{
+		std::cerr << "[MT] pose query failed – cannot zero\n";
+		return false;
+	}
+
+	// 3) 当前 Actuator 在 fr 坐标系下的位置、姿态
+	double relPosNow[3];
+	if (!MT.getRelPos("Actuator", "fr", relPosNow))
 	{
 		std::cerr << "[MT] getRelPos(Actuator,fr) failed – cannot zero\n";
 		return false;
 	}
 
-	// 3) “本次偏移” =  Δp₀ − (0,0,h0)
-	g_mtZero.actOffset[0] = relNow[0];
-	g_mtZero.actOffset[1] = relNow[1];
-	g_mtZero.actOffset[2] = relNow[2] - h0_mm;
+	double relRNow[9];
+	if (!MT.getRelRotMat("Actuator", "fr", relRNow))
+	{
+		std::cerr << "[MT] getRelRotMat(Actuator,fr) failed – cannot zero\n";
+		return false;
+	}
+
+	// 4) 保存基准 --------------------------------------------------
+	/* (1) fr / Actuator 绝对姿态 */
+	for (int i = 0; i < 3; ++i) {
+		g_mtZero.frPos[i] = fr.pos[i];
+		g_mtZero.actPos[i] = act.pos[i];
+	}
+	for (int i = 0; i < 9; ++i) {
+		g_mtZero.frR[i] = fr.rot[i];
+		g_mtZero.actR[i] = act.rot[i];
+	}
+
+	/* (2) 相对位置偏移 relPosOff = Δp₀ − (0,0,h₀) */
+	g_mtZero.relPosOff[0] = relPosNow[0];
+	g_mtZero.relPosOff[1] = relPosNow[1];
+	g_mtZero.relPosOff[2] = relPosNow[2] - h0_mm;
+
+	/* (3) 相对旋转偏移 relROff */
+	for (int i = 0; i < 9; ++i)
+		g_mtZero.relROff[i] = relRNow[i];
 
 	g_mtZero.valid = true;
 
-	std::cout << "[MT] zero done.  Offset = ("
-		<< g_mtZero.actOffset[0] << ", "
-		<< g_mtZero.actOffset[1] << ", "
-		<< g_mtZero.actOffset[2] << ") mm\n";
+	std::cout << "[MT] zero done.\n"
+		<< "   relPosOff = (" << g_mtZero.relPosOff[0] << ", "
+		<< g_mtZero.relPosOff[1] << ", "
+		<< g_mtZero.relPosOff[2] << ") mm\n";
 	return true;
+}
+
+PNODATA makePNO_mm_colRM(const double pos_mm[3],
+	const double Rcol[9])
+{
+	PNODATA out{};   // 全字段零初始化
+
+	///* -------- 1) 位置：mm → cm（SDK 默认 POS_CM） -------- */
+	//constexpr double kMM2CM = 1;
+	out.pos[0] = pos_mm[0];
+	out.pos[1] = pos_mm[1];
+	out.pos[2] = pos_mm[2];
+
+	std::cout << std::fixed << std::setprecision(2)
+		<< "[out.pos] (" << out.pos[0] << ", "
+		<< out.pos[1] << ", "
+		<< out.pos[2] << ") mm   \r ";
+
+
+	/* -------- 2) 旋转矩阵 → 四元数 (w,x,y,z) --------
+	   将列主序转为行主序元素便于公式书写                         */
+	const double m00 = Rcol[0], m01 = Rcol[3], m02 = Rcol[6];
+	const double m10 = Rcol[1], m11 = Rcol[4], m12 = Rcol[7];
+	const double m20 = Rcol[2], m21 = Rcol[5], m22 = Rcol[8];
+
+	double t = m00 + m11 + m22;          // matrix trace
+	double qw, qx, qy, qz;
+
+	if (t > 0.0) {
+		double s = std::sqrt(t + 1.0) * 2.0;   // s = 4*qw
+		qw = 0.25 * s;
+		qx = (m21 - m12) / s;
+		qy = (m02 - m20) / s;
+		qz = (m10 - m01) / s;
+	}
+	else if (m00 > m11 && m00 > m22) {
+		double s = std::sqrt(1.0 + m00 - m11 - m22) * 2.0;  // s = 4*qx
+		qw = (m21 - m12) / s;
+		qx = 0.25 * s;
+		qy = (m01 + m10) / s;
+		qz = (m02 + m20) / s;
+	}
+	else if (m11 > m22) {
+		double s = std::sqrt(1.0 + m11 - m00 - m22) * 2.0;  // s = 4*qy
+		qw = (m02 - m20) / s;
+		qx = (m01 + m10) / s;
+		qy = 0.25 * s;
+		qz = (m12 + m21) / s;
+	}
+	else {
+		double s = std::sqrt(1.0 + m22 - m00 - m11) * 2.0;  // s = 4*qz
+		qw = (m10 - m01) / s;
+		qx = (m02 + m20) / s;
+		qy = (m12 + m21) / s;
+		qz = 0.25 * s;
+	}
+
+	/* 归一化（数值安全） */
+	double norm = std::sqrt(qw * qw + qx * qx + qy * qy + qz * qz);
+	qw /= norm;  qx /= norm;  qy /= norm;  qz /= norm;
+
+	out.ori[0] = static_cast<float>(qw);
+	out.ori[1] = static_cast<float>(qx);
+	out.ori[2] = static_cast<float>(qy);
+	out.ori[3] = static_cast<float>(qz);
+
+
+	return out;
 }
