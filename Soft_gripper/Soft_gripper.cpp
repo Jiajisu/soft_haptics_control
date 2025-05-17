@@ -84,11 +84,14 @@ static double g_trajectoryStartTime = 0.0;
 // This accumulator persists across multiple calls to updateHaptics
 //static cVector3d pressureAccum(0.0, 0.0, 0.0);
 bool g_enableControl = false;
-bool g_doMTZero = false;
+std::atomic<bool> g_doMTZero{ false };   // 之前是 bool
 cVector3d ZeroPressure(0, 0, 0);
 static mtw::MicronTracker MT;
 bool mtZeroMarkers(mtw::MicronTracker& MT, double h0_mm);
 PNODATA makePNO_mm_colRM(const double pos_mm[3], const double Rcol[9]);
+void MTLoop();
+std::thread mtThread;   // 全局，默认构造为空线程
+
 //――――――― MicronTracker 线程共享数据 ―――――――
 struct MTPoseSnapshot {
 	bool   haveFr = false;
@@ -823,7 +826,7 @@ int main(int argc, char* argv[])
 	// 2) Turn on micron tracker
 	//-------------------------------------------
 	MT.init();         // 你在 main() 里只调一次
-
+	mtThread = std::thread(MTLoop);   // ★ 启动采集线程
 	//MT.zero(28);
 	// setup callback when application exits
 	atexit(close);
@@ -1025,9 +1028,46 @@ void close(void)
 	delete world;
 	delete handler;
 	closeCSV();
+	g_mtRunning = false;
+	if (mtThread.joinable()) mtThread.join();
 }
 
 //------------------------------------------------------------------------------
+void MTLoop()
+{
+	while (g_mtRunning)
+	{
+		if (!MT.update()) continue;           // 阻塞在 SDK FPS
+
+		MTPoseSnapshot snap;                  // 本地暂存
+		snap.haveFr = MT.getPoseAndRotMat("fr", snap.fr);
+		snap.haveAct = MT.getPoseAndRotMat("Actuator", snap.act);
+		snap.haveRel = (snap.haveFr && snap.haveAct &&
+			MT.getRelPos("Actuator", "fr", snap.relPos) &&
+			MT.getRelRotMat("Actuator", "fr", snap.relR));
+		snap.ts = MT.getLastTimestamp();
+
+		// 复制到共享区
+		{
+			std::lock_guard<std::mutex> lk(g_mtMtx);
+			g_mtSnap = snap;
+		}
+		if (g_doMTZero.exchange(false))      // 把标志原子置回 false
+		{
+			const double h0_mm = 29.45;      // 你的机械零点高度
+			if (mtZeroMarkers(MT, h0_mm))
+				std::cout << "[MT] zero done (from MTLoop)\n";
+			else
+				std::cerr << "[MT] zero failed\n";
+
+			// 写入 g_mtZero 已在 mtZeroMarkers() 内完成
+			// 如担心多线程读写，可再加 mutex：
+			// { std::lock_guard<std::mutex> lk(g_mtMtx); ... }
+		}
+	}
+}
+
+
 
 void updateGraphics(void)
 {
@@ -1059,10 +1099,6 @@ void updateGraphics(void)
 	// check for any OpenGL errors
 	GLenum err = glGetError();
 	if (err != GL_NO_ERROR) cout << "Error: " << gluErrorString(err) << endl;
-
-
-
-
 }
 
 //------------------------------------------------------------------------------
@@ -1276,45 +1312,68 @@ void updateHaptics(void)
 		//------------------------------------------------------------
 		// 0) 采集新帧
 		//------------------------------------------------------------
-		if (!MT.update()) {
-			std::cerr << "[MT] update failed, skip\n";
-			continue;
-		}
+		//if (!MT.update()) {
+		//	std::cerr << "[MT] update failed, skip\n";
+		//	continue;
+		//}
 
-		//------------------------------------------------------------
-		// 1) 读取 fr / Actuator 位姿，先检查返回值
-		//------------------------------------------------------------
+		////------------------------------------------------------------
+		//// 1) 读取 fr / Actuator 位姿，先检查返回值
+		////------------------------------------------------------------
 		mtw::Pose fr, act;
-		bool okFr = MT.getPoseAndRotMat("fr", fr);
-		bool okAct = MT.getPoseAndRotMat("Actuator", act);
+		//bool okFr = MT.getPoseAndRotMat("fr", fr);
+		//bool okAct = MT.getPoseAndRotMat("Actuator", act);
 
-		if (!okFr) {                                    // 没有 fr → 本帧无效
-			std::cerr << " fr lost, skip frame\n";
-			continue;
-		}
+		//if (!okFr) {                                    // 没有 fr → 本帧无效
+		//	std::cerr << " fr lost, skip frame\n";
+		//	continue;
+		//}
 
-		//------------------------------------------------------------
-		// 2) 首次调零（只做一次）
-		//------------------------------------------------------------
-		if (g_doMTZero) {
-			const double h0_mm = 29.45;
-			if (mtZeroMarkers(MT, h0_mm))
-				std::cout << "[MT] zero done\n";
-			g_doMTZero = false;
-		}
+		////------------------------------------------------------------
+		//// 2) 首次调零（只做一次）
+		////------------------------------------------------------------
+		//if (g_doMTZero) {
+		//	const double h0_mm = 29.45;
+		//	if (mtZeroMarkers(MT, h0_mm))
+		//		std::cout << "[MT] zero done\n";
+		//	g_doMTZero = false;
+		//}
 
-		//------------------------------------------------------------
-		// 3) 相对位姿（只有 okAct 时才计算）
-		//------------------------------------------------------------
-		double relPos[3] = { 0 }, relRot[9];        // 初始化
-		bool   okRel = false;
+		////------------------------------------------------------------
+		//// 3) 相对位姿（只有 okAct 时才计算）
+		////------------------------------------------------------------
+		//double relPos[3] = { 0 }, relRot[9];        // 初始化
+		//bool   okRel = false;
 
-		if (okAct &&
-			MT.getRelPos("Actuator", "fr", relPos) &&
-			MT.getRelRotMat("Actuator", "fr", relRot))
+		//if (okAct &&
+		//	MT.getRelPos("Actuator", "fr", relPos) &&
+		//	MT.getRelRotMat("Actuator", "fr", relRot))
+		//{
+		//	okRel = true;
+		//}
+		//――――― 读取最新快照（非阻塞，仅拷贝一次）―――――
+		MTPoseSnapshot snap;
 		{
-			okRel = true;
+			std::lock_guard<std::mutex> lk(g_mtMtx);
+			snap = g_mtSnap;
 		}
+		// 若无新数据，直接进入下个循环
+		if (!snap.haveFr) {
+			cSleepMs(0);   // 让线程保持 1 kHz 以上
+			goto FINISH_HAPTIC_CYCLE;
+		}
+
+		// 把原本 okFr/okAct/relPos/relRot 的逻辑改成走 snap
+		fr = snap.fr;
+		act = snap.act;
+		double relPos[3];  double relRot[9];
+		if (snap.haveRel) {
+			std::memcpy(relPos, snap.relPos, sizeof(relPos));
+			std::memcpy(relRot, snap.relR, sizeof(relRot));
+		}
+		bool okFr = snap.haveFr;
+		bool okAct = snap.haveAct;
+		bool okRel = snap.haveRel;
 
 		//------------------------------------------------------------
 		// 4) 调零：位置（严格刚体变换） / 旋转
@@ -1849,7 +1908,8 @@ void updateHaptics(void)
 		/////////////////////////////////////////////////////////////////////////
 		// FINALIZE
 		/////////////////////////////////////////////////////////////////////////
-
+	FINISH_HAPTIC_CYCLE:
+		;   // 空语句占位
 		// send forces to haptic device
 		//tool->applyToDevice();  
 	}
