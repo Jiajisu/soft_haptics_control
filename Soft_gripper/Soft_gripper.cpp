@@ -12,7 +12,8 @@
 #include <fstream>
 #include <vector>
 #include <chrono>
-
+#include <thread>
+#include <mutex>
 //------------------------------------------------------------------------------
 // Pohelmus
 //------------------------------------------------------------------------------
@@ -74,9 +75,9 @@ bool recordSensorDataToCSV = false;  // toggle if record sensor value
 static bool hasInitPress = false;
 cVector3d presCurr;
 chai3d::cVector3d PressuretoArduino;
-int circleIndex = 1;
-int pointIndex = 0;
-double duration = 15.0;         // total movement time
+int circleIndex = 2;
+int pointIndex = 7;
+double duration = 19.0;         // total movement time
 static bool g_doBoresight = false;
 static bool g_trajectoryStarted = false;
 static double g_trajectoryStartTime = 0.0;
@@ -88,6 +89,19 @@ cVector3d ZeroPressure(0, 0, 0);
 static mtw::MicronTracker MT;
 bool mtZeroMarkers(mtw::MicronTracker& MT, double h0_mm);
 PNODATA makePNO_mm_colRM(const double pos_mm[3], const double Rcol[9]);
+//――――――― MicronTracker 线程共享数据 ―――――――
+struct MTPoseSnapshot {
+	bool   haveFr = false;
+	bool   haveAct = false;
+	bool   haveRel = false;
+	mtw::Pose fr, act;
+	double  relPos[3]{};
+	double  relR[9]{};
+	double  ts = 0.0;
+};
+MTPoseSnapshot       g_mtSnap;
+std::mutex           g_mtMtx;
+std::atomic<bool>    g_mtRunning{ true };
 
 /// mm → m，并把 3×3 行主序矩阵转成 cMatrix3d
 inline void mtPose2Chai(const double pos_mm[3],
@@ -1102,9 +1116,9 @@ void updateHaptics(void)
 	//  2) r=5.0, center=(0,0,21.5)
 	//  3) r=3.0, center=(0,0,24.5)
 	std::vector<TrajectoryGenerator::CircleDefinition> circles = {
-		{0.004, chai3d::cVector3d(0.0, 0.0, 0.032)},
-		{0.004, chai3d::cVector3d(0.0, 0.0, 0.024)},
-		{0.0060, chai3d::cVector3d(0.0, 0.0, 0.028)}
+		{0.004, chai3d::cVector3d(0.0, 0.0, 0.03345)},
+		{0.004, chai3d::cVector3d(0.0, 0.0, 0.02545)},
+		{0.0060, chai3d::cVector3d(0.0, 0.0, 0.02945)}
 	};
 
 	// number of traget points on the circle
@@ -1249,7 +1263,7 @@ void updateHaptics(void)
 			std::string sendStr = PressuretoArduino.str();
 			arduinoWriteData(1, sendStr);
 			std::cout << "sendStr: "
-				<< sendStr << "\r";
+				<< sendStr << std::endl;
 		}
 		else
 		{
@@ -1283,7 +1297,7 @@ void updateHaptics(void)
 		// 2) 首次调零（只做一次）
 		//------------------------------------------------------------
 		if (g_doMTZero) {
-			const double h0_mm = 28.0;
+			const double h0_mm = 29.45;
 			if (mtZeroMarkers(MT, h0_mm))
 				std::cout << "[MT] zero done\n";
 			g_doMTZero = false;
@@ -2454,10 +2468,10 @@ PNODATA makePNO_mm_colRM(const double pos_mm[3],
 	out.pos[1] = pos_mm[1];
 	out.pos[2] = pos_mm[2];
 
-	std::cout << std::fixed << std::setprecision(2)
-		<< "[out.pos] (" << out.pos[0] << ", "
-		<< out.pos[1] << ", "
-		<< out.pos[2] << ") mm   \r ";
+	//std::cout << std::fixed << std::setprecision(2)
+	//	<< "[out.pos] (" << out.pos[0] << ", "
+	//	<< out.pos[1] << ", "
+	//	<< out.pos[2] << ") mm   \r ";
 
 
 	/* -------- 2) 旋转矩阵 → 四元数 (w,x,y,z) --------

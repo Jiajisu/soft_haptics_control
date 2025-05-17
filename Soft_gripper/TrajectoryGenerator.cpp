@@ -23,7 +23,9 @@ namespace TrajectoryGenerator {
             const std::vector<CircleDefinition>& circles,
             int pointsEach
         )
-    {
+    {   
+        constexpr double kStartDegOffset = -15.0;   // 统一起始角偏移 15°
+
         std::vector<std::vector<chai3d::cVector3d>> result;
         result.resize(circles.size());
 
@@ -36,7 +38,7 @@ namespace TrajectoryGenerator {
             for (int i = 0; i < pointsEach; ++i)
             {
                 // Similar to MATLAB: angle = 2pi*(i / pointsEach)
-                double angleDeg = 360.0 / pointsEach * i;
+                double angleDeg = kStartDegOffset + 360.0 / pointsEach * i;
                 double angleRad = angleDeg * M_PI / 180.0;
 
                 double xPos = center.x() + radius * std::cos(angleRad);
