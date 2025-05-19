@@ -75,8 +75,8 @@ bool recordSensorDataToCSV = false;  // toggle if record sensor value
 static bool hasInitPress = false;
 cVector3d presCurr;
 chai3d::cVector3d PressuretoArduino;
-int circleIndex = 2;
-int pointIndex = 7;
+int circleIndex = 0;
+int pointIndex = 11;
 double duration = 19.0;         // total movement time
 static bool g_doBoresight = false;
 static bool g_trajectoryStarted = false;
@@ -1054,7 +1054,7 @@ void MTLoop()
 		}
 		if (g_doMTZero.exchange(false))      // 把标志原子置回 false
 		{
-			const double h0_mm = 29.45;      // 你的机械零点高度
+			const double h0_mm = ResolvedRateControl.h_0;      // 你的机械零点高度
 			if (mtZeroMarkers(MT, h0_mm))
 				std::cout << "[MT] zero done (from MTLoop)\n";
 			else
@@ -1152,9 +1152,9 @@ void updateHaptics(void)
 	//  2) r=5.0, center=(0,0,21.5)
 	//  3) r=3.0, center=(0,0,24.5)
 	std::vector<TrajectoryGenerator::CircleDefinition> circles = {
-		{0.004, chai3d::cVector3d(0.0, 0.0, 0.03345)},
+		{0.004, chai3d::cVector3d(0.0, 0.0, ResolvedRateControl.h_0 * 0.001+ 0.003)},
 		{0.004, chai3d::cVector3d(0.0, 0.0, 0.02545)},
-		{0.0060, chai3d::cVector3d(0.0, 0.0, 0.02945)}
+		{0.0060, chai3d::cVector3d(0.0, 0.0, ResolvedRateControl.h_0 *0.001)}
 	};
 
 	// number of traget points on the circle
@@ -1297,7 +1297,7 @@ void updateHaptics(void)
 			cVector3d PressuretoArduino = presCurr;
 			//cVector3d PressuretoArduino(20,20,20);
 			std::string sendStr = PressuretoArduino.str();
-			arduinoWriteData(1, sendStr);
+			arduinoWriteData(100, sendStr);
 			std::cout << "sendStr: "
 				<< sendStr << std::endl;
 		}
