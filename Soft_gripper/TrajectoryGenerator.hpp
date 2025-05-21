@@ -60,6 +60,14 @@ namespace TrajectoryGenerator {
         double duration
     );
 
+    chai3d::cVector3d getSineWaveTrajectory(
+        const chai3d::cVector3d& center,        // 基准点
+        const chai3d::cVector3d& amplitude,     // 各轴峰值 (m, mm 任意单位)
+        double freq,                            // 频率  Hz
+        double t,                               // 当前时间  s
+        int numPeriods = 11                     // 运行周期数，默认 11
+    );
+
 } // namespace TrajectoryGenerator
 
 #endif // TRAJECTORY_GENERATOR_HPP

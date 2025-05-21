@@ -75,9 +75,9 @@ bool recordSensorDataToCSV = false;  // toggle if record sensor value
 static bool hasInitPress = false;
 cVector3d presCurr;
 chai3d::cVector3d PressuretoArduino;
-int circleIndex = 0;
-int pointIndex = 11;
-double duration = 19.0;         // total movement time
+int circleIndex = 1;
+int pointIndex = 5;
+double duration = 15.0;         // total movement time
 static bool g_doBoresight = false;
 static bool g_trajectoryStarted = false;
 static double g_trajectoryStartTime = 0.0;
@@ -91,7 +91,8 @@ bool mtZeroMarkers(mtw::MicronTracker& MT, double h0_mm);
 PNODATA makePNO_mm_colRM(const double pos_mm[3], const double Rcol[9]);
 void MTLoop();
 std::thread mtThread;   // 全局，默认构造为空线程
-
+static inline void mulRT(const double R[9], const double v[3], double o[3]);
+static inline void colToRow(const double C[9], double R[9]);
 //――――――― MicronTracker 线程共享数据 ―――――――
 struct MTPoseSnapshot {
 	bool   haveFr = false;
@@ -347,7 +348,6 @@ int main(int argc, char* argv[])
 	
 
 	cout << endl << endl;
-
 
 	//--------------------------------------------------------------------------
 	// OPEN GL - WINDOW DISPLAY
@@ -1145,7 +1145,7 @@ void updateHaptics(void)
 	sphereTarget->setUseTransparency(true); // 启用透明效果
 
 	// 将小球添加到场景
-	//world->addChild(sphereTarget);
+	world->addChild(sphereTarget);
 
 	// generate targets on circles
 	//  1) r=3.5, center=(0,0,19.5)
@@ -1171,6 +1171,12 @@ void updateHaptics(void)
 	static cVector3d sensor2PosOffset(0.0, 0.0, 0.0);
 
 	chai3d::cVector3d PointOnCir = allCircles[circleIndex][pointIndex];
+
+
+	static const chai3d::cVector3d center(0.0, 0.0, ResolvedRateControl.h_0 * 0.001);   // 起始点
+	//static const chai3d::cVector3d amp    (0.00, 0.00001, 0.003); // 幅值: ±3 mm, ±2 mm, ±1 mm
+	static const chai3d::cVector3d amp    (0.00, 0.003, 0.00); // 幅值: ±3 mm, ±2 mm, ±1 mm
+	double freq = 1;                      // 5 Hz 带宽测试
 
 	// simulation in now running
 	simulationRunning = true;
@@ -1207,9 +1213,20 @@ void updateHaptics(void)
 		// 	/////////////////////////////////////////////////////////////////////////
 		// Define Parameters for a fixed trajectory 
 		/////////////////////////////////////////////////////////////////////////
-	//-----------------------------Demo: Generate a circular traj---------------------------
+		// -----------------------------Get Time --------------------------------------
 		double absoluteTime = getCurrentTime();
-		double elapsedTime = 0.0;
+
+		 double elapsedTime = 0.0;
+		 if (g_trajectoryStarted)
+		 {
+			 // if started, compute time since we pressed 'R'
+			 elapsedTime = absoluteTime - g_trajectoryStartTime;
+			 // clamp at >= 0
+			 if (elapsedTime < 0.0) elapsedTime = 0.0;
+		 }
+
+		//-----------------------------Generate a circular traj---------------------------
+
 	    //double radius = 0.5;
 		//chai3d::cVector3d center(0.0, 0.0, 0);
 		//double angularSpeed = 1; 
@@ -1218,16 +1235,29 @@ void updateHaptics(void)
 		//chai3d::cVector3d TrajTarget =
 		//	TrajectoryGenerator::getCircularTrajectory(radius, center, angularSpeed, currentTime);
 		//sphereTarget->setLocalPos(TrajTarget);
-	//-----------------------------Gnerate a straight traj---------------------------
-		if (g_trajectoryStarted)
-		{
-			// if started, compute time since we pressed 'R'
-			elapsedTime = absoluteTime - g_trajectoryStartTime;
-			// clamp at >= 0
-			if (elapsedTime < 0.0) elapsedTime = 0.0;
-		}
+		//-----------------------------Gnerate a straight traj---------------------------
+		// 
+		//chai3d::cVector3d endPos(0, 0.00001, 0.033);
+		//chai3d::cVector3d TrajTarget = TrajectoryGenerator::getStraightLineTrajectory(
+		//	startPos,
+		//	endPos,
+		//	elapsedTime,
+		//	duration
+		//);
+		//-----------------------------Gnerate a Sinewave traj---------------------------
+		 //chai3d::cVector3d TrajTarget;          // ① 提前声明
 
+		 //if (g_trajectoryStarted)               // ② 只有开始后才计算正弦
+		 //{
+			// TrajTarget = TrajectoryGenerator::getSineWaveTrajectory(
+			//	 center, amp, freq, elapsedTime);  // 默认 11 周期
+		 //}
+		 //else
+		 //{
+			// TrajTarget = center;               // 未开始时保持在中心
+		 //}
 
+		//-----------------------------Gnerate On Circle traj---------------------------
 		chai3d::cVector3d TrajTarget = TrajectoryGenerator::getTransitionPosition(
 			startPos,       // start point
 			PointOnCir,      // target point on the circle
@@ -1236,14 +1266,7 @@ void updateHaptics(void)
 		);
 
 
-		//chai3d::cVector3d endPos(0, 0.00001, 0.033);
 
-		//chai3d::cVector3d TrajTarget = TrajectoryGenerator::getStraightLineTrajectory(
-		//	startPos,
-		//	endPos,
-		//	elapsedTime,
-		//	duration
-		//);
 
 		sphereTarget->setLocalPos(TrajTarget);
 
@@ -1282,29 +1305,29 @@ void updateHaptics(void)
 		//	<< std::endl;
 		//-----------------------------External iteration-------------------------
 
-		if (!hasInitPress)
-		{
-			presCurr = ResolvedRateControl.m_initPressure;  // (20, 20, 20)
-			hasInitPress = true;       //
-		}
-		cVector3d targetPos = TrajTarget * 1000;
-		auto result = ResolvedRateControl.updateMotion(presCurr, targetPos);
-		chai3d::cVector3d newPos = result[0];
-		chai3d::cVector3d newPressure = result[1];
-		double error = (newPos - targetPos).length();
-		if (error < 0.05)
-		{
-			cVector3d PressuretoArduino = presCurr;
-			//cVector3d PressuretoArduino(20,20,20);
-			std::string sendStr = PressuretoArduino.str();
-			arduinoWriteData(100, sendStr);
-			std::cout << "sendStr: "
-				<< sendStr << std::endl;
-		}
-		else
-		{
-			presCurr = newPressure; // 
-		}
+		//if (!hasInitPress)
+		//{
+		//	presCurr = ResolvedRateControl.m_initPressure;  // (20, 20, 20)
+		//	hasInitPress = true;       //
+		//}
+		//cVector3d targetPos = TrajTarget * 1000;
+		//auto result = ResolvedRateControl.updateMotion(presCurr, targetPos);
+		//chai3d::cVector3d newPos = result[0];
+		//chai3d::cVector3d newPressure = result[1];
+		//double error = (newPos - targetPos).length();
+		//if (error < 0.1)
+		//{
+		//	cVector3d PressuretoArduino = presCurr;
+		//	//cVector3d PressuretoArduino(20,20,20);
+		//	std::string sendStr = PressuretoArduino.str();
+		//	arduinoWriteData(20, sendStr);
+		//	std::cout << "sendStr: "
+		//		<< sendStr << std::endl;
+		//}
+		//else
+		//{
+		//	presCurr = newPressure; // 
+		//}
 		// --- MicronTracker 更新 ----------------------------------------------------
 		//MT.init();   // 只调一次
 		// 
@@ -1407,12 +1430,15 @@ void updateHaptics(void)
 
 		// ----- rel的调零（严格刚体变换）-----
 		if (okRel && g_mtZero.valid) {
-			for (int r = 0; r < 3; ++r) {
-				relZeroPos[r] =
-					g_mtZero.relROff[0 * 3 + r] * (relPos[0] - g_mtZero.relPosOff[0]) +
-					g_mtZero.relROff[1 * 3 + r] * (relPos[1] - g_mtZero.relPosOff[1]) +
-					g_mtZero.relROff[2 * 3 + r] * (relPos[2] - g_mtZero.relPosOff[2]);
-			}
+			// 平移差 d = Δp₀ - (0,0,h₀)
+			double d[3] = { relPos[0] - g_mtZero.relPosOff[0],
+							relPos[1] - g_mtZero.relPosOff[1],
+							relPos[2] - g_mtZero.relPosOff[2] };
+
+			// 行向量乘 Rᵀ ：mulRT 已按 “R 转置” 实现
+			double Rrow[9];
+			colToRow(g_mtZero.relROff, Rrow);   // <<--- 只需这一句
+			mulRT(Rrow, d, relZeroPos);         // 用 Rrow 而不是原来的 relROff
 
 			for (int r = 0; r < 3; ++r)
 				for (int c = 0; c < 3; ++c)
@@ -1516,47 +1542,45 @@ void updateHaptics(void)
 
 			//------------------------------P to L model---------------------------------
 
-			//cVector3d targetPos = TrajTarget * 1000;  // 目标位置 (mm)
-			//if (g_enableControl)
-			//{
-
-			//	//std::cout << std::fixed << std::setprecision(2)
-			//	//	<< "[sensor2CrctPNOArc] (" << sensor2CrctPNOArc.pos[0] << ", "
-			//	//	<< sensor2CrctPNOArc.pos[1] << ", "
-			//	//	<< sensor2CrctPNOArc.pos[2] << ") mm    "
-			//	//	<< "[targetPos] ( "
-			//	//	<< targetPos << " ) mm\r";
-			//	auto result = ResolvedRateControl.updateMotionCloseLoop(targetPos, sensor2CrctPNO);
-			//	if (!std::isfinite(frZeroPos[0])) {
-			//		std::cerr << " Invalid data detected, skip frame\n";
-			//		continue;
-			//	}
-			//	//std::cout << "   targetPos: " << targetPos << "   RELPos: " << sensor2CrctPNO.pos[0] << ", " << sensor2CrctPNO.pos[1] << ", " << sensor2CrctPNO.pos[2] << std::endl;
-			//	cVector3d newPos = result[0];       // 计算的新位置
-			//	cVector3d newPressure = result[1];  // 计算的新压力
-			//	double error = (newPos - targetPos).length();
-			//	//std::cout << "Error: " << error << " = " << newPos << " - " << targetPos << std::endl;
-			//	//std::cout << "newpos " << newPos << std::endl;
-
-			//		//if (error < 1)
-			//		//{
-			//	cVector3d PressuretoArduino = presCurr;
-			//	//cVector3d PressuretoArduino(20,20,20);
-			//	std::string sendStr = PressuretoArduino.str();
-			//	arduinoWriteData(50, sendStr);
-			//	//std::cout << "sendStr: "
-			//	//	<< sendStr << "\r";
-			////}
-			////else
-			////{
-			//	presCurr = newPressure; // 
-			//	//}
-			//}
-			else
+			cVector3d targetPos = TrajTarget * 1000;  // 目标位置 (mm)
+			if (g_enableControl)
 			{
-				std::string sendZero = ZeroPressure.str();
-				arduinoWriteData(50, sendZero);
+				//std::cout << std::fixed << std::setprecision(2)
+				//	<< "[sensor2CrctPNOArc] (" << sensor2CrctPNOArc.pos[0] << ", "
+				//	<< sensor2CrctPNOArc.pos[1] << ", "
+				//	<< sensor2CrctPNOArc.pos[2] << ") mm    "
+				//	<< "[targetPos] ( "
+				//	<< targetPos << " ) mm\r";
+				auto result = ResolvedRateControl.updateMotionCloseLoop(targetPos, sensor2CrctPNO);
+				if (!std::isfinite(frZeroPos[0])) {
+					std::cerr << " Invalid data detected, skip frame\n";
+					continue;
+				}
+				//std::cout << "   targetPos: " << targetPos << "   RELPos: " << sensor2CrctPNO.pos[0] << ", " << sensor2CrctPNO.pos[1] << ", " << sensor2CrctPNO.pos[2] << std::endl;
+				cVector3d newPos = result[0];       // 计算的新位置
+				cVector3d newPressure = result[1];  // 计算的新压力
+				double error = (newPos - targetPos).length();
+				//std::cout << "Error: " << error << " = " << newPos << " - " << targetPos << std::endl;
+				//std::cout << "newpos " << newPos << std::endl;
+					//if (error < 1)
+					//{
+				cVector3d PressuretoArduino = presCurr;
+				//cVector3d PressuretoArduino(20,20,20);
+				std::string sendStr = PressuretoArduino.str();
+				arduinoWriteData(50, sendStr);
+				//std::cout << "sendStr: "
+				//	<< sendStr << "\r";
+			//}
+			//else
+			//{
+				presCurr = newPressure; // 
+				//}
 			}
+			//else
+			//{
+			//	std::string sendZero = ZeroPressure.str();
+			//	arduinoWriteData(50, sendZero);
+			//}
 
 
 
@@ -1595,6 +1619,9 @@ void updateHaptics(void)
 				row.emplace_back(std::to_string(sensor2CrctPNO.ori[2]));
 				row.emplace_back(std::to_string(sensor2CrctPNO.ori[3]));
 
+				row.emplace_back(std::to_string(TrajTarget.x()));   // ★
+				row.emplace_back(std::to_string(TrajTarget.y()));   // ★
+				row.emplace_back(std::to_string(TrajTarget.z()));   // ★
 				// ③ 写入
 				writeToCSV(row);
 			}
@@ -2013,10 +2040,13 @@ void openCSV(const std::string& filename)
 	}
 	// 只在文件为空时写表头
 	if (csvFile.tellp() == 0) {
-		csvFile << "MTTimestamp,"
+		csvFile
+			<< "TimeStamp,"                             // ★修改：统一叫 TimeStamp
 			<< "fr_posX,fr_posY,fr_posZ,fr_oriW,fr_oriX,fr_oriY,fr_oriZ,"
 			<< "act_posX,act_posY,act_posZ,act_oriW,act_oriX,act_oriY,act_oriZ,"
-			<< "rel_posX,rel_posY,rel_posZ,rel_oriW,rel_oriX,rel_oriY,rel_oriZ\n";
+			<< "rel_posX,rel_posY,rel_posZ,rel_oriW,rel_oriX,rel_oriY,rel_oriZ,"
+			<< "cmd_X,cmd_Y,cmd_Z"                      // ★新增
+			<< '\n';
 		csvFile.flush();
 	}
 }
@@ -2499,10 +2529,13 @@ bool mtZeroMarkers(mtw::MicronTracker& MT, double h0_mm)
 		g_mtZero.actR[i] = act.rot[i];
 	}
 
-	/* (2) 相对位置偏移 relPosOff = Δp₀ − (0,0,h₀) */
-	g_mtZero.relPosOff[0] = relPosNow[0];
-	g_mtZero.relPosOff[1] = relPosNow[1];
-	g_mtZero.relPosOff[2] = relPosNow[2] - h0_mm;
+	// 计算 R0（零点姿态）的 z-轴向量（列 2）
+	double z0[3] = { relRNow[6], relRNow[7], relRNow[8] };   // col-major → 第 3 列
+
+	// t_off = relPosNow - R0 · (0,0,h0)
+	g_mtZero.relPosOff[0] = relPosNow[0] - h0_mm * z0[0];
+	g_mtZero.relPosOff[1] = relPosNow[1] - h0_mm * z0[1];
+	g_mtZero.relPosOff[2] = relPosNow[2] - h0_mm * z0[2];
 
 	/* (3) 相对旋转偏移 relROff */
 	for (int i = 0; i < 9; ++i)

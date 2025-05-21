@@ -188,7 +188,7 @@ namespace mtw {
             if (!getPoseAndRotMat(markerA, a) || !getPoseAndRotMat(markerB, b))
                 return false;
 
-            double dp[3]{ b.pos[0] - a.pos[0], b.pos[1] - a.pos[1], b.pos[2] - a.pos[2] };
+            double dp[3]{  b.pos[0] - a.pos[0],  b.pos[1] - a.pos[1],  b.pos[2] - a.pos[2] };
             outPos[0] = a.rot[0] * dp[0] + a.rot[3] * dp[1] + a.rot[6] * dp[2];
             outPos[1] = a.rot[1] * dp[0] + a.rot[4] * dp[1] + a.rot[7] * dp[2];
             outPos[2] = a.rot[2] * dp[0] + a.rot[5] * dp[1] + a.rot[8] * dp[2];
