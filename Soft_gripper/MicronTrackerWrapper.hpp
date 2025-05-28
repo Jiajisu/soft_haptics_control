@@ -121,24 +121,33 @@ namespace mtw {
 
             identColl_ = Collection_New();
             xf_ = Xform3D_New();
-            // (2) 把所有已加载模板的 Kalman 打开
+            // (2) 把所有已加载模板的 Kalman + 抖动滤波 打开
             {
                 mtHandle coll = Collection_New();
                 mtCheck(Markers_TemplatesMarkersGet(coll), "TemplatesMarkersGet");
-
                 const int n = Collection_Count(coll);
                 for (int i = 1; i <= n; ++i)
                 {
                     mtHandle mk = Collection_Int(coll, i);
-                    Marker_KalmanNoiseFilterEnabledSet(mk, true);   // per-marker 打开
-                    Marker_FilterNoiseCoeffSet(mk, cam_, 1);
+
+                    // 已有：
+                    Marker_KalmanNoiseFilterEnabledSet(mk, true);
+                    // 低一点的噪声系数 → 更平滑
+                    Marker_FilterNoiseCoeffSet(mk, cam_, 0.4);   // ← 由 1 改 0.4
+
+                    // ★ 新增：开启角度抖动滤波
+                    Marker_AngularJitterFilterCoefficientSet(mk, 0.8);  // 0.7~0.9 视需求微调
+                    // 可选：再统一一下位置系数
+                    Marker_JitterFilterCoefficientSet(mk, 0.8);
                 }
                 Collection_Free(coll);
             }
 
-            // (3) 可选：调 Jitter 参数（一次）
-            Markers_JitterFilterCoefficientSet(0.8);       // 0.0-1.0，越大越平滑
-            Markers_JitterFilterHistoryLengthSet(30);      // 历史帧长度
+          
+            // (3) 全局抖动参数（一次）—— 位置 + 角度都调
+            Markers_JitterFilterCoefficientSet(0.7);        // 已有
+            Markers_AngularJitterFilterCoefficientSet(0.7); // ★ 新增
+            Markers_JitterFilterHistoryLengthSet(30);       // 已有，可增到 40-60 帧
             
             initialised_ = true;
 

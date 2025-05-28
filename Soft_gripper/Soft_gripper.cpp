@@ -75,9 +75,9 @@ bool recordSensorDataToCSV = false;  // toggle if record sensor value
 static bool hasInitPress = false;
 cVector3d presCurr;
 chai3d::cVector3d PressuretoArduino;
-int circleIndex = 1;
-int pointIndex = 5;
-double duration = 15.0;         // total movement time
+int circleIndex = 0;
+int pointIndex = 10;
+double duration = 14.0;         // total movement time
 static bool g_doBoresight = false;
 static bool g_trajectoryStarted = false;
 static double g_trajectoryStartTime = 0.0;
@@ -120,7 +120,7 @@ inline void mtPose2Chai(const double pos_mm[3],
 		Rrow[3], Rrow[4], Rrow[5],
 		Rrow[6], Rrow[7], Rrow[8]);
 }
-
+static bool g_mtAvailable = false;           // ★ 新增
 
 //--------------------------------------------------------------
 //  保存调零时抓到的基准
@@ -825,8 +825,16 @@ int main(int argc, char* argv[])
 	//-------------------------------------------
 	// 2) Turn on micron tracker
 	//-------------------------------------------
-	MT.init();         // 你在 main() 里只调一次
-	mtThread = std::thread(MTLoop);   // ★ 启动采集线程
+	try {
+		MT.init();                       // 保留原调用
+		g_mtAvailable = true;            // ★ 成功则置真
+		mtThread = std::thread(MTLoop);  // ★ 启动采集线程
+		std::cout << "[MT] connected.\n";
+	}
+	catch (const std::exception& e) {
+		std::cerr << "[MT] not detected → run without MT (" << e.what() << ")\n";
+		g_mtRunning = false;             // 不启动采集线程
+	}
 	//MT.zero(28);
 	// setup callback when application exits
 	atexit(close);
@@ -1029,14 +1037,16 @@ void close(void)
 	delete handler;
 	closeCSV();
 	g_mtRunning = false;
-	if (mtThread.joinable()) mtThread.join();
+	if (g_mtAvailable && mtThread.joinable())
+		mtThread.join();        // ★ 只有线程真的启了才 join
 }
 
 //------------------------------------------------------------------------------
 void MTLoop()
 {
 	while (g_mtRunning)
-	{
+	{	
+		if (!g_mtAvailable) return;
 		if (!MT.update()) continue;           // 阻塞在 SDK FPS
 
 		MTPoseSnapshot snap;                  // 本地暂存
@@ -1152,9 +1162,9 @@ void updateHaptics(void)
 	//  2) r=5.0, center=(0,0,21.5)
 	//  3) r=3.0, center=(0,0,24.5)
 	std::vector<TrajectoryGenerator::CircleDefinition> circles = {
-		{0.004, chai3d::cVector3d(0.0, 0.0, ResolvedRateControl.h_0 * 0.001+ 0.003)},
-		{0.004, chai3d::cVector3d(0.0, 0.0, 0.02545)},
-		{0.0060, chai3d::cVector3d(0.0, 0.0, ResolvedRateControl.h_0 *0.001)}
+		{0.0035, chai3d::cVector3d(0.0, 0.0, ResolvedRateControl.h_0 * 0.001+ 0.003)},
+		{0.0045, chai3d::cVector3d(0.0, 0.0, ResolvedRateControl.h_0 * 0.001 - 0.006)},
+		{0.0055, chai3d::cVector3d(0.0, 0.0, ResolvedRateControl.h_0 *0.001 -0.0012)}
 	};
 
 	// number of traget points on the circle
@@ -1175,7 +1185,7 @@ void updateHaptics(void)
 
 	static const chai3d::cVector3d center(0.0, 0.0, ResolvedRateControl.h_0 * 0.001);   // 起始点
 	//static const chai3d::cVector3d amp    (0.00, 0.00001, 0.003); // 幅值: ±3 mm, ±2 mm, ±1 mm
-	static const chai3d::cVector3d amp    (0.00, 0.003, 0.00); // 幅值: ±3 mm, ±2 mm, ±1 mm
+	static const chai3d::cVector3d amp    (0.002, 0.000, 0.00); // 幅值: ±3 mm, ±2 mm, ±1 mm
 	double freq = 1;                      // 5 Hz 带宽测试
 
 	// simulation in now running
@@ -1245,25 +1255,24 @@ void updateHaptics(void)
 		//	duration
 		//);
 		//-----------------------------Gnerate a Sinewave traj---------------------------
-		 //chai3d::cVector3d TrajTarget;          // ① 提前声明
-
-		 //if (g_trajectoryStarted)               // ② 只有开始后才计算正弦
-		 //{
-			// TrajTarget = TrajectoryGenerator::getSineWaveTrajectory(
-			//	 center, amp, freq, elapsedTime);  // 默认 11 周期
-		 //}
-		 //else
-		 //{
-			// TrajTarget = center;               // 未开始时保持在中心
-		 //}
+		 chai3d::cVector3d TrajTarget;          // ① 提前声明
+		 if (g_trajectoryStarted)               // ② 只有开始后才计算正弦
+		 {
+			 TrajTarget = TrajectoryGenerator::getSineWaveTrajectory(
+				 center, amp, freq, elapsedTime);  // 默认 11 周期
+		 }
+		 else
+		 {
+			 TrajTarget = center;               // 未开始时保持在中心
+		 }
 
 		//-----------------------------Gnerate On Circle traj---------------------------
-		chai3d::cVector3d TrajTarget = TrajectoryGenerator::getTransitionPosition(
-			startPos,       // start point
-			PointOnCir,      // target point on the circle
-			elapsedTime,
-			duration
-		);
+		//chai3d::cVector3d TrajTarget = TrajectoryGenerator::getTransitionPosition(
+		//	startPos,       // start point
+		//	PointOnCir,      // target point on the circle
+		//	elapsedTime,
+		//	duration
+		//);
 
 
 
@@ -1305,33 +1314,29 @@ void updateHaptics(void)
 		//	<< std::endl;
 		//-----------------------------External iteration-------------------------
 
-		//if (!hasInitPress)
-		//{
-		//	presCurr = ResolvedRateControl.m_initPressure;  // (20, 20, 20)
-		//	hasInitPress = true;       //
-		//}
-		//cVector3d targetPos = TrajTarget * 1000;
-		//auto result = ResolvedRateControl.updateMotion(presCurr, targetPos);
-		//chai3d::cVector3d newPos = result[0];
-		//chai3d::cVector3d newPressure = result[1];
-		//double error = (newPos - targetPos).length();
-		//if (error < 0.1)
-		//{
-		//	cVector3d PressuretoArduino = presCurr;
-		//	//cVector3d PressuretoArduino(20,20,20);
-		//	std::string sendStr = PressuretoArduino.str();
-		//	arduinoWriteData(20, sendStr);
-		//	std::cout << "sendStr: "
-		//		<< sendStr << std::endl;
-		//}
-		//else
-		//{
-		//	presCurr = newPressure; // 
-		//}
-		// --- MicronTracker 更新 ----------------------------------------------------
-		//MT.init();   // 只调一次
-		// 
-		// ...
+		if (!hasInitPress)
+		{
+			presCurr = ResolvedRateControl.m_initPressure;  // (20, 20, 20)
+			hasInitPress = true;       //
+		}
+		cVector3d targetPos = TrajTarget * 1000;
+		auto result = ResolvedRateControl.updateMotion(presCurr, targetPos);
+		chai3d::cVector3d newPos = result[0];
+		chai3d::cVector3d newPressure = result[1];
+		double error = (newPos - targetPos).length();
+		if (error < 0.1)
+		{
+			cVector3d PressuretoArduino = presCurr;
+			//cVector3d PressuretoArduino(20,20,20);
+			std::string sendStr = PressuretoArduino.str();
+			arduinoWriteData(50, sendStr);
+			std::cout << "sendStr: "
+				<< sendStr << std::endl;
+		}
+		else
+		{
+			presCurr = newPressure; 
+		}
 		//------------------------------------------------------------
 		// 0) 采集新帧
 		//------------------------------------------------------------
@@ -1376,9 +1381,12 @@ void updateHaptics(void)
 		//}
 		//――――― 读取最新快照（非阻塞，仅拷贝一次）―――――
 		MTPoseSnapshot snap;
-		{
+		if (g_mtAvailable) {
 			std::lock_guard<std::mutex> lk(g_mtMtx);
 			snap = g_mtSnap;
+		}
+		else {
+			snap.haveFr = false;   // ★ 无 MT 时后面直接跳过
 		}
 		// 若无新数据，直接进入下个循环
 		if (!snap.haveFr) {
@@ -1542,45 +1550,35 @@ void updateHaptics(void)
 
 			//------------------------------P to L model---------------------------------
 
-			cVector3d targetPos = TrajTarget * 1000;  // 目标位置 (mm)
-			if (g_enableControl)
-			{
-				//std::cout << std::fixed << std::setprecision(2)
-				//	<< "[sensor2CrctPNOArc] (" << sensor2CrctPNOArc.pos[0] << ", "
-				//	<< sensor2CrctPNOArc.pos[1] << ", "
-				//	<< sensor2CrctPNOArc.pos[2] << ") mm    "
-				//	<< "[targetPos] ( "
-				//	<< targetPos << " ) mm\r";
-				auto result = ResolvedRateControl.updateMotionCloseLoop(targetPos, sensor2CrctPNO);
-				if (!std::isfinite(frZeroPos[0])) {
-					std::cerr << " Invalid data detected, skip frame\n";
-					continue;
-				}
-				//std::cout << "   targetPos: " << targetPos << "   RELPos: " << sensor2CrctPNO.pos[0] << ", " << sensor2CrctPNO.pos[1] << ", " << sensor2CrctPNO.pos[2] << std::endl;
-				cVector3d newPos = result[0];       // 计算的新位置
-				cVector3d newPressure = result[1];  // 计算的新压力
-				double error = (newPos - targetPos).length();
-				//std::cout << "Error: " << error << " = " << newPos << " - " << targetPos << std::endl;
-				//std::cout << "newpos " << newPos << std::endl;
-					//if (error < 1)
-					//{
-				cVector3d PressuretoArduino = presCurr;
-				//cVector3d PressuretoArduino(20,20,20);
-				std::string sendStr = PressuretoArduino.str();
-				arduinoWriteData(50, sendStr);
-				//std::cout << "sendStr: "
-				//	<< sendStr << "\r";
-			//}
-			//else
+			//cVector3d targetPos = TrajTarget * 1000;  // 目标位置 (mm)
+			//if (g_enableControl)
 			//{
-				presCurr = newPressure; // 
-				//}
-			}
-			//else
-			//{
-			//	std::string sendZero = ZeroPressure.str();
-			//	arduinoWriteData(50, sendZero);
+			//	//std::cout << std::fixed << std::setprecision(2)
+			//	//	<< "[sensor2CrctPNOArc] (" << sensor2CrctPNOArc.pos[0] << ", "
+			//	//	<< sensor2CrctPNOArc.pos[1] << ", "
+			//	//	<< sensor2CrctPNOArc.pos[2] << ") mm    "
+			//	//	<< "[targetPos] ( "
+			//	//	<< targetPos << " ) mm\r";
+			//	auto result = ResolvedRateControl.updateMotionCloseLoop(targetPos, sensor2CrctPNO);
+			//	if (!std::isfinite(frZeroPos[0])) {
+			//		std::cerr << " Invalid data detected, skip frame\n";
+			//		continue;
+			//	}
+			//	//std::cout << "   targetPos: " << targetPos << "   RELPos: " << sensor2CrctPNO.pos[0] << ", " << sensor2CrctPNO.pos[1] << ", " << sensor2CrctPNO.pos[2] << std::endl;
+			//	cVector3d newPos = result[0];       // 计算的新位置
+			//	cVector3d newPressure = result[1];  // 计算的新压力
+			//	double error = (newPos - targetPos).length();
+			//	//std::cout << "Error: " << error << " = " << newPos << " - " << targetPos << std::endl;
+			//	//std::cout << "newpos " << newPos << std::endl;
+			//	cVector3d PressuretoArduino = presCurr;
+			//	//cVector3d PressuretoArduino(20,20,20);
+			//	std::string sendStr = PressuretoArduino.str();
+			//	arduinoWriteData(50, sendStr);
+			//	//std::cout << "sendStr: "
+			//	//	<< sendStr << "\r";
+			//	presCurr = newPressure; // 
 			//}
+
 
 
 

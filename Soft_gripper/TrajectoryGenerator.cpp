@@ -24,7 +24,7 @@ namespace TrajectoryGenerator {
             int pointsEach
         )
     {   
-        constexpr double kStartDegOffset = 0;   // 统一起始角偏移 15°
+        constexpr double kStartDegOffset =  -30;   // 统一起始角偏移 15°
 
         std::vector<std::vector<chai3d::cVector3d>> result;
         result.resize(circles.size());
