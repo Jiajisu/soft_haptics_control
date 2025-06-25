@@ -26,6 +26,7 @@
     <ClCompile Include="SerialPort.cpp" />
     <ClCompile Include="TimeUtil.cpp" />
     <ClCompile Include="TrajectoryGenerator.cpp" />
+    <ClCompile Include="UserStudyManager.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\Dist64MT4\MTC.h" />
@@ -35,6 +36,7 @@
     <ClInclude Include="SerialPort.hpp" />
     <ClInclude Include="TimeUtil.hpp" />
     <ClInclude Include="TrajectoryGenerator.hpp" />
+    <ClInclude Include="UserStudyManager.hpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <ProjectName>Soft_gripper</ProjectName>
