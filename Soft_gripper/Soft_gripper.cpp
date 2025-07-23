@@ -127,7 +127,8 @@ static mtw::MicronTracker MT;
 bool mtZeroMarkers(mtw::MicronTracker& MT, double h0_mm);
 PNODATA makePNO_mm_colRM(const double pos_mm[3], const double Rcol[9]);
 void MTLoop();
-std::thread mtThread;   // 全局，默认构造为空线程
+//std::thread mtThread;   // 全局，默认构造为空线程
+cThread* mtThread = nullptr;
 static inline void mulRT(const double R[9], const double v[3], double o[3]);
 static inline void colToRow(const double C[9], double R[9]);
 //――――――― MicronTracker 线程共享数据 ―――――――
@@ -921,7 +922,11 @@ int main(int argc, char* argv[])
 	try {
 		MT.init();                       // 保留原调用
 		g_mtAvailable = true;            // ★ 成功则置真
-		mtThread = std::thread(MTLoop);  // ★ 启动采集线程
+
+		// 使用CHAI3D线程框架，设置为中等优先级（低于haptic但高于普通线程）
+		mtThread = new cThread();
+		mtThread->start(MTLoop, CTHREAD_PRIORITY_GRAPHICS); // 或使用 CTHREAD_PRIORITY_HAPTICS-1
+
 		std::cout << "[MT] connected.\n";
 	}
 	catch (const std::exception& e) {
@@ -1351,9 +1356,12 @@ void close(void)
 	delete handler;
 	closeCSV();
 	g_mtRunning = false;
-	if (g_mtAvailable && mtThread.joinable())
-		mtThread.join();        // ★ 只有线程真的启了才 join
-
+	if (g_mtAvailable && mtThread != nullptr)
+	{
+		mtThread->stop();      // 使用CHAI3D线程的停止方法
+		delete mtThread;       // 释放线程对象
+		mtThread = nullptr;
+	}
 	if (axisX) { delete axisX; axisX = nullptr; }
 	if (axisY) { delete axisY; axisY = nullptr; }
 	if (axisZ) { delete axisZ; axisZ = nullptr; }
