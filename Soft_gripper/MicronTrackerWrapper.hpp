@@ -121,6 +121,11 @@ namespace mtw {
 
             identColl_ = Collection_New();
             xf_ = Xform3D_New();
+            // ★ 新增：设置相机曝光参数
+            mtCheck(Camera_AutoExposureSet(cam_, 0), "AutoExposure off");  // 关闭自动曝光
+            mtCheck(Camera_ShutterMsecsSet(cam_, 0.0), "Shutter 0ms");     // 设置快门时间为0
+            mtCheck(Camera_GainFSet(cam_, 17.4), "Gain 17.4");             // 设置增益为17.4
+
             // (2) 把所有已加载模板的 Kalman + 抖动滤波 打开
             {
                 mtHandle coll = Collection_New();

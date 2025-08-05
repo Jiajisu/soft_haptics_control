@@ -160,6 +160,96 @@ inline void mtPose2Chai(const double pos_mm[3],
 }
 static bool g_mtAvailable = false;           // ★ 新增
 
+//------------------------------------------------------------------------------
+// Calibration相关变量
+//------------------------------------------------------------------------------
+// 标定矩阵
+cMatrix3d g_rot_top_actuator;    // top在actuator坐标系下的旋转
+cVector3d g_pos_top_actuator;    // top在actuator坐标系下的位置
+cMatrix3d g_rot_bot_finger;      // bot在finger坐标系下的旋转
+cVector3d g_pos_bot_finger;      // bot在finger坐标系下的位置
+
+// 显示球体
+cShapeSphere* sphereFinger = nullptr;    // 绿色 - finger marker
+cShapeSphere* sphereActuator = nullptr;  // 红色 - actuator marker  
+cShapeSphere* sphereBot = nullptr;       // 蓝色 - 计算得到的bot
+cShapeSphere* sphereTop = nullptr;       // 黄色 - 计算得到的top
+
+// 显示控制标志
+bool g_showCalibrationSpheres = false;
+
+//------------------------------------------------------------------------------
+// 读取4x4变换矩阵文件
+//------------------------------------------------------------------------------
+bool loadTransformMatrix(const std::string& filename, cMatrix3d& rotation, cVector3d& position)
+{
+	std::ifstream file(filename);
+	if (!file.is_open()) {
+		std::cerr << "Cannot open calibration file: " << filename << std::endl;
+		return false;
+	}
+
+	double mat[4][4];
+	for (int i = 0; i < 4; i++) {
+		for (int j = 0; j < 4; j++) {
+			file >> mat[i][j];
+		}
+	}
+	file.close();
+
+	// 提取旋转矩阵（3x3）
+	rotation.set(mat[0][0], mat[0][1], mat[0][2],
+		mat[1][0], mat[1][1], mat[1][2],
+		mat[2][0], mat[2][1], mat[2][2]);
+
+	// 提取位置向量（单位：mm）
+	position.set(mat[0][3], mat[1][3], mat[2][3]);
+
+	std::cout << "Loaded calibration from " << filename << std::endl;
+	std::cout << "Position: " << position.str(2) << " mm" << std::endl;
+
+	return true;
+}
+//------------------------------------------------------------------------------
+// MT相机坐标系到CHAI3D坐标系的变换
+//------------------------------------------------------------------------------
+void convertMTtoCHAI3D(cMatrix3d& rotation, cVector3d& position)
+{
+	// 1. 变换位置向量 - 只对Z取负
+	double origX = position.x();
+	double origY = position.y();
+	double origZ = position.z();
+
+	position.set(origX,    // X保持不变
+		origY,    // Y保持不变
+		-origZ);   // Z取负
+
+	// 2. 变换旋转矩阵
+	// 对于只有Z轴反向的情况，变换规则是：
+	// 涉及Z轴的元素需要取负
+	double r[3][3];
+	for (int i = 0; i < 3; i++) {
+		for (int j = 0; j < 3; j++) {
+			r[i][j] = rotation(i, j);
+		}
+	}
+
+	// 当只有Z轴反向时，旋转矩阵的变换规则：
+	// - 第3列（Z轴方向）的前两个元素取负
+	// - 第3行（Z轴分量）的前两个元素取负
+	// - 其他元素保持不变
+	rotation.set(
+		r[0][0], r[0][1], -r[0][2],  // 第一行：Z分量取负
+		r[1][0], r[1][1], -r[1][2],  // 第二行：Z分量取负
+		-r[2][0], -r[2][1], r[2][2]   // 第三行：X,Y分量取负
+	);
+
+	// 打印用于调试
+	std::cout << "[Calibration] MT->CHAI3D transform (Z-only) applied" << std::endl;
+	std::cout << "  Position: (" << origX << "," << origY << "," << origZ
+		<< ") -> (" << position.x() << "," << position.y() << "," << position.z() << ")" << std::endl;
+}
+
 //--------------------------------------------------------------
 //  保存调零时抓到的基准
 //--------------------------------------------------------------
@@ -169,11 +259,11 @@ struct MTZeroFrame
 	double frPos[3]{};
 	double frR[9]{};          // col-major
 
-	// --- Actuator 在相机坐标系下的零点姿态（可选，调试方便） ---
-	double actPos[3]{};
-	double actR[9]{};         // col-major
+	// --- Actuator 在相机坐标系下的零点姿态 ---
+	double actPos[3]{};      // ★ 添加这行
+	double actR[9]{};        // ★ 添加这行
 
-	// --- Actuator 在 fr 坐标系下的“应扣除”量 ---
+	// --- Actuator 在 fr 坐标系下的"应扣除"量 ---
 	double relPosOff[3]{};    // (Δp₀ - (0,0,h₀))  ，单位 mm
 	double relROff[9]{};      // 相对旋转零点 (col-major)
 
@@ -621,7 +711,7 @@ int main(int argc, char* argv[])
 	cMesh* base = new cMesh();
 
 	// add object to world
-	world->addChild(base);
+	//world->addChild(base);
 
 	// build mesh using a cylinder primitive
 	cCreateCylinder(base,
@@ -761,6 +851,58 @@ int main(int argc, char* argv[])
 
 	//leftCube->setLocalPos( 0.02, -0.03, 0.04);
 	// 在现有对象创建代码后添加
+	// 
+/////////////////////////////////////////////////////////////////////////
+// CALIBRATION SPHERES
+/////////////////////////////////////////////////////////////////////////
+
+// 创建4个球体用于显示calibration
+	double calibSphereRadius = 0.003; // 3mm半径
+
+	// Finger marker - 绿色
+	sphereFinger = new cShapeSphere(calibSphereRadius);
+	sphereFinger->m_material->setGreenForest();
+	sphereFinger->setEnabled(false); // 初始隐藏
+	world->addChild(sphereFinger);
+
+	// Actuator marker - 红色
+	sphereActuator = new cShapeSphere(calibSphereRadius);
+	sphereActuator->m_material->setRedCrimson();
+	sphereActuator->setEnabled(false);
+	world->addChild(sphereActuator);
+
+	// Bot (计算得到) - 蓝色
+	sphereBot = new cShapeSphere(calibSphereRadius);
+	sphereBot->m_material->setBlueRoyal();
+	sphereBot->setEnabled(false);
+	world->addChild(sphereBot);
+
+	// Top (计算得到) - 黄色
+	sphereTop = new cShapeSphere(calibSphereRadius);
+	sphereTop->m_material->setYellow();
+	sphereTop->setEnabled(false);
+	world->addChild(sphereTop);
+
+	// 加载calibration文件
+	if (!loadTransformMatrix("actuator_T_top.txt", g_rot_top_actuator, g_pos_top_actuator)) {
+		std::cerr << "Failed to load actuator_T_top calibration!" << std::endl;
+	}
+	else {
+		std::cout << "[Calibration] Loaded actuator_T_top from MT coordinates" << std::endl;
+		// ★ 转换到CHAI3D坐标系
+		convertMTtoCHAI3D(g_rot_top_actuator, g_pos_top_actuator);
+		std::cout << "[Calibration] Converted actuator_T_top to CHAI3D coordinates" << std::endl;
+	}
+
+	if (!loadTransformMatrix("finger_T_bot.txt", g_rot_bot_finger, g_pos_bot_finger)) {
+		std::cerr << "Failed to load finger_T_bot calibration!" << std::endl;
+	}
+	else {
+		std::cout << "[Calibration] Loaded finger_T_bot from MT coordinates" << std::endl;
+		// ★ 转换到CHAI3D坐标系
+		convertMTtoCHAI3D(g_rot_bot_finger, g_pos_bot_finger);
+		std::cout << "[Calibration] Converted finger_T_bot to CHAI3D coordinates" << std::endl;
+	}
 /////////////////////////////////////////////////////////////////////////
 // 实验用立方体 (左右两个)
 /////////////////////////////////////////////////////////////////////////
@@ -1333,6 +1475,25 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 			std::cout << "Press 'T' to start trials" << std::endl;
 		}
 		}
+	else if (a_key == GLFW_KEY_V)  // V for Verify calibration
+	{
+		g_showCalibrationSpheres = !g_showCalibrationSpheres;
+
+		if (g_showCalibrationSpheres) {
+			std::cout << "[INFO] Calibration verification ON - showing all markers" << std::endl;
+			std::cout << "  Green = Finger, Red = Actuator" << std::endl;
+			std::cout << "  Blue = Bot (calculated), Yellow = Top (calculated)" << std::endl;
+		}
+		else {
+			std::cout << "[INFO] Calibration verification OFF" << std::endl;
+		}
+
+		// 切换显示状态
+		if (sphereFinger) sphereFinger->setEnabled(g_showCalibrationSpheres);
+		if (sphereActuator) sphereActuator->setEnabled(g_showCalibrationSpheres);
+		if (sphereBot) sphereBot->setEnabled(g_showCalibrationSpheres);
+		if (sphereTop) sphereTop->setEnabled(g_showCalibrationSpheres);
+		}
 
 
 }
@@ -1341,7 +1502,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 
 void close(void)
 {
-	// stop the simulation
+	// stop the simulationg_mtAvailable
 	simulationRunning = false;
 
 	// wait for graphics and haptics loops to terminate
@@ -1384,6 +1545,11 @@ void close(void)
 		delete labelTrialInfo;
 		labelTrialInfo = nullptr;
 	}
+	// 清理calibration球体
+	if (sphereFinger) { delete sphereFinger; sphereFinger = nullptr; }
+	if (sphereActuator) { delete sphereActuator; sphereActuator = nullptr; }
+	if (sphereBot) { delete sphereBot; sphereBot = nullptr; }
+	if (sphereTop) { delete sphereTop; sphereTop = nullptr; }
 	closeCSV();
 	//closeExperimentCSV();
 }
@@ -1397,11 +1563,11 @@ void MTLoop()
 		if (!MT.update()) continue;           // 阻塞在 SDK FPS
 
 		MTPoseSnapshot snap;                  // 本地暂存
-		snap.haveFr = MT.getPoseAndRotMat("fr", snap.fr);
-		snap.haveAct = MT.getPoseAndRotMat("Actuator", snap.act);
+		snap.haveFr = MT.getPoseAndRotMat("finger", snap.fr);
+		snap.haveAct = MT.getPoseAndRotMat("actuator", snap.act);
 		snap.haveRel = (snap.haveFr && snap.haveAct &&
-			MT.getRelPos("Actuator", "fr", snap.relPos) &&
-			MT.getRelRotMat("Actuator", "fr", snap.relR));
+			MT.getRelPos("actuator", "finger", snap.relPos) &&
+			MT.getRelRotMat("actuator", "finger", snap.relR));
 		snap.ts = MT.getLastTimestamp();
 
 		// 复制到共享区
@@ -1417,9 +1583,6 @@ void MTLoop()
 			else
 				std::cerr << "[MT] zero failed\n";
 
-			// 写入 g_mtZero 已在 mtZeroMarkers() 内完成
-			// 如担心多线程读写，可再加 mutex：
-			// { std::lock_guard<std::mutex> lk(g_mtMtx); ... }
 		}
 	}
 }
@@ -1802,7 +1965,33 @@ void updateHaptics(void)
 			for (int i = 0; i < 3; ++i) frZeroPos[i] = fr.pos[i];
 			for (int i = 0; i < 9; ++i) frRotZero[i] = fr.rot[i];
 		}
+		// ★ 新增：actuator的调零（严格刚体变换）
+		double actZeroPos[3];
+		double actRotZero[9];
 
+		if (okAct && g_mtZero.valid) {
+			// ★ 关键修改：使用g_mtZero.frR而不是g_mtZero.actR
+			// 位置调零 - 使用finger的旋转矩阵
+			for (int r = 0; r < 3; ++r) {
+				actZeroPos[r] =
+					g_mtZero.frR[0 * 3 + r] * (act.pos[0] - g_mtZero.frPos[0]) +
+					g_mtZero.frR[1 * 3 + r] * (act.pos[1] - g_mtZero.frPos[1]) +
+					g_mtZero.frR[2 * 3 + r] * (act.pos[2] - g_mtZero.frPos[2]);
+			}
+
+			// 旋转矩阵调零 - 使用finger的旋转矩阵
+			for (int r = 0; r < 3; ++r)
+				for (int c = 0; c < 3; ++c)
+					actRotZero[c * 3 + r] =
+					g_mtZero.frR[0 * 3 + r] * act.rot[0 * 3 + c] +
+					g_mtZero.frR[1 * 3 + r] * act.rot[1 * 3 + c] +
+					g_mtZero.frR[2 * 3 + r] * act.rot[2 * 3 + c];
+		}
+		else if (okAct) {
+			// 没有调零时保留原始值
+			for (int i = 0; i < 3; ++i) actZeroPos[i] = act.pos[i];
+			for (int i = 0; i < 9; ++i) actRotZero[i] = act.rot[i];
+		}
 		// ----- rel的调零（严格刚体变换）-----
 		if (okRel && g_mtZero.valid) {
 			// 平移差 d = Δp₀ - (0,0,h₀)
@@ -1832,20 +2021,39 @@ void updateHaptics(void)
 		//------------------------------------------------------------
 		// 6) 渲染  (mm→m ×0.001)
 		//------------------------------------------------------------
-		// -- fr --
-		cVector3d posFrM(frZeroPos[0] * 0.001, frZeroPos[1] * 0.001, frZeroPos[2] * 0.001);
+		// -- finger marker --
+// 修改为：坐标变换 - 交换X,Y轴，Z轴反向
+		cVector3d posFrM(frZeroPos[1] * 0.001,     // X <- Y
+			frZeroPos[0] * 0.001,     // Y <- X  
+			-frZeroPos[2] * 0.001);   // Z <- -Z
 		cMatrix3d rotFrM;
 		rotFrM.set(
 			frRotZero[0], frRotZero[3], frRotZero[6],
 			frRotZero[1], frRotZero[4], frRotZero[7],
 			frRotZero[2], frRotZero[5], frRotZero[8]);
 
-		//cylinderBot->setLocalPos(posFrM);
-
-		cylinderBot->setLocalPos(0, 0.107,  0.07);
-
+		// cylinderBot保持固定位置（如果需要）
+		cylinderBot->setLocalPos(0, 0.107, 0.07);
 		cylinderBot->setLocalRot(rotFrM);
+
+		// ★ 关键：让tool跟随finger marker移动
 		tool->setDeviceLocalPos(posFrM);
+		tool->setDeviceLocalRot(rotFrM);
+		// ★ 使用正确的CHAI3D方法更新tool
+		tool->updateToolImagePosition();  // 更新tool图像位置
+		tool->computeInteractionForces(); // 重新计算交互力
+
+		//// 添加调试输出确认tool位置更新
+		//static int toolDebugCount = 0;
+		//if (++toolDebugCount % 60 == 0) {
+		//	std::cout << "[TOOL DEBUG] Setting tool to finger pos: " << posFrM.str()
+		//		<< " (from finger: " << frZeroPos[0] << "," << frZeroPos[1] << "," << frZeroPos[2] << "mm)" << std::endl;
+
+		//	// 验证tool位置是否真的被设置了
+		//	cVector3d currentToolPos = tool->getDeviceLocalPos();
+		//	std::cout << "[TOOL VERIFY] Current tool pos: " << currentToolPos.str() << std::endl;
+		//}
+
 		// -- rel (仅当 okRel && g_mtZero.valid) --
 		if (okRel && g_mtZero.valid)
 		{
@@ -1890,10 +2098,11 @@ void updateHaptics(void)
 				// ---------- (2) pno_2  ← act（若 okAct） ----------
 				if (okAct)
 				{
-					double posAct[3] = { act.pos[0], act.pos[1], act.pos[2] };   // mm
-					double RAct[9] = { act.rot[0], act.rot[1], act.rot[2],
-										 act.rot[3], act.rot[4], act.rot[5],
-										 act.rot[6], act.rot[7], act.rot[8] };
+					// ★ 修改：使用调零后的actuator位置和旋转
+					double posAct[3] = { actZeroPos[0], actZeroPos[1], actZeroPos[2] };   // 使用调零后的值
+					double RAct[9] = { actRotZero[0], actRotZero[1], actRotZero[2],
+										actRotZero[3], actRotZero[4], actRotZero[5],
+										actRotZero[6], actRotZero[7], actRotZero[8] };
 					pno_2 = makePNO_mm_colRM(posAct, RAct);
 				}
 
@@ -1907,7 +2116,7 @@ void updateHaptics(void)
 				sensor2CrctPNO = makePNO_mm_colRM(posRel, RRel);
 			}
 
-
+	
 			//std::cout << std::fixed << std::setprecision(2)
 			//	<< "[relZeroPos] (" << relZeroPos[0] << ", "
 			//	<< relZeroPos[1] << ", "
@@ -2001,7 +2210,171 @@ void updateHaptics(void)
 		}
 
 
+		// ★ 将calibration验证代码放在这里 ★
+// 在获取到snap数据之后，添加calibration验证代码
+if (g_showCalibrationSpheres && snap.haveFr && snap.haveAct) {
+	// 获取finger和actuator的原始位姿
+	mtw::Pose fingerPose = snap.fr;      // fr对应finger
+	mtw::Pose actuatorPose = snap.act;   // act对应actuator
 
+	// ★ 重要：应用与前面相同的调零变换
+	double fingerZeroPos[3];
+	double fingerRotZero[9];
+	double actuatorZeroPos[3];
+	double actuatorRotZero[9];
+
+	if (g_mtZero.valid) {
+		// finger (fr) 的调零
+		for (int r = 0; r < 3; ++r) {
+			fingerZeroPos[r] =
+				g_mtZero.frR[0 * 3 + r] * (fingerPose.pos[0] - g_mtZero.frPos[0]) +
+				g_mtZero.frR[1 * 3 + r] * (fingerPose.pos[1] - g_mtZero.frPos[1]) +
+				g_mtZero.frR[2 * 3 + r] * (fingerPose.pos[2] - g_mtZero.frPos[2]);
+		}
+
+		// actuator的调零 - 修改为使用finger的参考系
+		for (int r = 0; r < 3; ++r) {
+			actuatorZeroPos[r] =
+				g_mtZero.frR[0 * 3 + r] * (actuatorPose.pos[0] - g_mtZero.frPos[0]) +
+				g_mtZero.frR[1 * 3 + r] * (actuatorPose.pos[1] - g_mtZero.frPos[1]) +
+				g_mtZero.frR[2 * 3 + r] * (actuatorPose.pos[2] - g_mtZero.frPos[2]);
+		}
+
+		// 旋转矩阵调零
+		for (int r = 0; r < 3; ++r)
+			for (int c = 0; c < 3; ++c) {
+				fingerRotZero[c * 3 + r] =
+					g_mtZero.frR[0 * 3 + r] * fingerPose.rot[0 * 3 + c] +
+					g_mtZero.frR[1 * 3 + r] * fingerPose.rot[1 * 3 + c] +
+					g_mtZero.frR[2 * 3 + r] * fingerPose.rot[2 * 3 + c];
+
+				actuatorRotZero[c * 3 + r] =
+					g_mtZero.frR[0 * 3 + r] * actuatorPose.rot[0 * 3 + c] +
+					g_mtZero.frR[1 * 3 + r] * actuatorPose.rot[1 * 3 + c] +
+					g_mtZero.frR[2 * 3 + r] * actuatorPose.rot[2 * 3 + c];
+			}
+	}
+	else {
+		// 没有调零时使用原始值
+		for (int i = 0; i < 3; ++i) {
+			fingerZeroPos[i] = fingerPose.pos[i];
+			actuatorZeroPos[i] = actuatorPose.pos[i];
+		}
+		for (int i = 0; i < 9; ++i) {
+			fingerRotZero[i] = fingerPose.rot[i];
+			actuatorRotZero[i] = actuatorPose.rot[i];
+		}
+	}
+
+	// ★ 应用与前面相同的坐标变换
+	// finger: 交换X,Y轴，Z轴反向
+	cVector3d fingerPos(fingerZeroPos[1] * 0.001,     // X <- Y
+		fingerZeroPos[0] * 0.001,     // Y <- X  
+		-fingerZeroPos[2] * 0.001);   // Z <- -Z
+
+	// actuator: 同样的变换
+	cVector3d actuatorPos(actuatorZeroPos[1] * 0.001,
+		actuatorZeroPos[0] * 0.001,
+		-actuatorZeroPos[2] * 0.001);
+
+	// 构建旋转矩阵
+	cMatrix3d fingerRot;
+	fingerRot.set(fingerRotZero[0], fingerRotZero[1], fingerRotZero[2],
+		fingerRotZero[3], fingerRotZero[4], fingerRotZero[5],
+		fingerRotZero[6], fingerRotZero[7], fingerRotZero[8]);
+
+	cMatrix3d actuatorRot;
+	actuatorRot.set(actuatorRotZero[0], actuatorRotZero[1], actuatorRotZero[2],
+		actuatorRotZero[3], actuatorRotZero[4], actuatorRotZero[5],
+		actuatorRotZero[6], actuatorRotZero[7], actuatorRotZero[8]);
+
+	// 更新直接追踪到的marker位置（绿色和红色球）
+	if (sphereFinger) {
+		sphereFinger->setLocalPos(fingerPos);
+		sphereFinger->setLocalRot(fingerRot);
+	}
+	if (sphereActuator) {
+		sphereActuator->setLocalPos(actuatorPos);
+		sphereActuator->setLocalRot(actuatorRot);
+	}
+
+	// 计算bot在世界坐标系下的位置（蓝色球）
+	// bot_world = finger_world * bot_finger
+	cVector3d botPosLocal = g_pos_bot_finger * 0.001; // mm转m
+	cVector3d botPosWorld = fingerPos + fingerRot * botPosLocal;
+	cMatrix3d botRotWorld = fingerRot * g_rot_bot_finger;
+
+	if (sphereBot) {
+		sphereBot->setLocalPos(botPosWorld);
+		sphereBot->setLocalRot(botRotWorld);
+	}
+
+	// 计算top在世界坐标系下的位置（黄色球）
+	// top_world = actuator_world * top_actuator
+	cVector3d topPosLocal = g_pos_top_actuator * 0.001; // mm转m
+	cVector3d topPosWorld = actuatorPos + actuatorRot * topPosLocal;
+	cMatrix3d topRotWorld = actuatorRot * g_rot_top_actuator;
+
+	if (sphereTop) {
+		sphereTop->setLocalPos(topPosWorld);
+		sphereTop->setLocalRot(topRotWorld);
+	}
+
+	// 计算并显示top在bot坐标系下的相对位置（用于验证）
+	cMatrix3d botRotWorldInv = botRotWorld;
+	botRotWorldInv.trans(); // 转置得到逆矩阵（对于旋转矩阵）
+
+	cVector3d topRelPos = botRotWorldInv * (topPosWorld - botPosWorld);
+	cMatrix3d topRelRot = botRotWorldInv * topRotWorld;
+
+	// ★ 新增：计算红球（actuator）和绿球（finger）之间的相对距离
+	cVector3d relativeVector = actuatorPos - fingerPos;  // 世界坐标系下的相对向量
+	double relativeDistance = relativeVector.length();   // 相对距离（米）
+
+	// ★ 新增：保存上一次的距离用于检测变化
+	static double lastRelativeDistance = -1.0;
+	static bool firstMeasurement = true;
+	double distanceChange = 0.0;
+
+	if (!firstMeasurement) {
+		distanceChange = relativeDistance - lastRelativeDistance;
+	}
+	lastRelativeDistance = relativeDistance;
+	firstMeasurement = false;
+
+	static int printCounter = 0;
+	if (++printCounter % 60 == 0) { // 每60帧打印一次
+		//std::cout << "[Calibration] Top relative to Bot: "
+		//	<< "Pos=" << (topRelPos * 1000).str(1) << " mm" << std::endl;
+
+		// ★ 新增：打印红绿球相对距离信息
+		std::cout << "[RED-GREEN Distance] Current: " << std::fixed << std::setprecision(4)
+			<< relativeDistance * 1000 << " mm";
+				std::cout << "[Top in Bot frame] Position: ("
+			<< std::fixed << std::setprecision(2)
+			<< topRelPos.x() * 1000 << ", "
+			<< topRelPos.y() * 1000 << ", "
+			<< topRelPos.z() * 1000 << ") mm" << std::endl;
+		//if (!firstMeasurement) {
+		//	std::cout << " | Change: " << std::setprecision(2) << distanceChange * 1000 << " mm";
+		//	if (std::abs(distanceChange * 1000) > 0.1) {  // 如果变化超过0.1mm
+		//		std::cout << " *** MOVEMENT DETECTED ***";
+		//	}
+		//}
+		//std::cout << std::endl;
+
+		//// ★ 新增：打印相对向量的各个分量
+		//std::cout << "[RED-GREEN Vector] X=" << relativeVector.x() * 1000
+		//	<< " Y=" << relativeVector.y() * 1000
+		//	<< " Z=" << relativeVector.z() * 1000 << " mm" << std::endl;
+
+		//std::cout << "[Debug] Sphere positions - "
+		//	<< "Finger: " << fingerPos.str(3) << " "
+		//	<< "Actuator: " << actuatorPos.str(3) << " "
+		//	<< "Bot: " << botPosWorld.str(3) << " "
+		//	<< "Top: " << topPosWorld.str(3) << std::endl;
+	}
+}
 
 
 
@@ -2227,7 +2600,7 @@ void updateHaptics(void)
 
 
 		// compute interaction forces
-		tool->computeInteractionForces();
+		//tool->computeInteractionForces();
 
 
 		// 在主触觉循环中，在现有碰撞检测代码后添加：
@@ -2235,58 +2608,149 @@ void updateHaptics(void)
 		/////////////////////////////////////////////////////////////////////////
 		// 实验模式处理
 		/////////////////////////////////////////////////////////////////////////
-		if (experimentMode && userStudy && userStudy->isTrialActive()) {
-			// 显示立方体
-			leftCube->setEnabled(true);
-			rightCube->setEnabled(true);
+if (experimentMode && userStudy && userStudy->isTrialActive()) {
+	// 显示立方体
+	leftCube->setEnabled(true);
+	rightCube->setEnabled(true);
 
-			// 根据当前试次设置刚度
-			double refStiffness = userStudy->getCurrentReferenceStiffness();
-			double compStiffness = userStudy->getCurrentComparisonStiffness();
+	// 根据当前试次设置刚度
+	double refStiffness = userStudy->getCurrentReferenceStiffness();
+	double compStiffness = userStudy->getCurrentComparisonStiffness();
 
-			// 随机分配左右位置
-			static bool leftIsReference = (rand() % 2 == 0);
-			if (leftIsReference) {
-				leftCube->m_material->setStiffness(refStiffness);
-				rightCube->m_material->setStiffness(compStiffness);
+	// 随机分配左右位置
+	static bool leftIsReference = (rand() % 2 == 0);
+	if (leftIsReference) {
+		leftCube->m_material->setStiffness(refStiffness);
+		rightCube->m_material->setStiffness(compStiffness);
+	}
+	else {
+		leftCube->m_material->setStiffness(compStiffness);
+		rightCube->m_material->setStiffness(refStiffness);
+	}
+
+	// 检测立方体交互
+	bool currentlyTouchingLeft = false;
+	bool currentlyTouchingRight = false;
+
+	if (tool->m_hapticPoint->getNumCollisionEvents() > 0) {
+		cCollisionEvent* event = tool->m_hapticPoint->getCollisionEvent(0);
+		if (event->m_object == leftCube) {
+			currentlyTouchingLeft = true;
+			if (!isInteractingWithLeftCube) {
+				userStudy->recordTouch(true);
+				isInteractingWithLeftCube = true;
 			}
-			else {
-				leftCube->m_material->setStiffness(compStiffness);
-				rightCube->m_material->setStiffness(refStiffness);
-			}
-
-			// 检测立方体交互
-			bool currentlyTouchingLeft = false;
-			bool currentlyTouchingRight = false;
-
-			if (tool->m_hapticPoint->getNumCollisionEvents() > 0) {
-				cCollisionEvent* event = tool->m_hapticPoint->getCollisionEvent(0);
-				if (event->m_object == leftCube) {
-					currentlyTouchingLeft = true;
-					if (!isInteractingWithLeftCube) {
-						userStudy->recordTouch(true);
-						isInteractingWithLeftCube = true;
-					}
-				}
-				else if (event->m_object == rightCube) {
-					currentlyTouchingRight = true;
-					if (!isInteractingWithRightCube) {
-						userStudy->recordTouch(false);
-						isInteractingWithRightCube = true;
-					}
-				}
-			}
-
-			// 更新交互状态
-			if (!currentlyTouchingLeft) isInteractingWithLeftCube = false;
-			if (!currentlyTouchingRight) isInteractingWithRightCube = false;
-
 		}
-		else {
-			// 非实验模式时隐藏立方体
-			if (leftCube) leftCube->setEnabled(false);
-			if (rightCube) rightCube->setEnabled(false);
+		else if (event->m_object == rightCube) {
+			currentlyTouchingRight = true;
+			if (!isInteractingWithRightCube) {
+				userStudy->recordTouch(false);
+				isInteractingWithRightCube = true;
+			}
 		}
+	}
+
+	// 更新交互状态
+	if (!currentlyTouchingLeft) isInteractingWithLeftCube = false;
+	if (!currentlyTouchingRight) isInteractingWithRightCube = false;
+
+	/////////////////////////////////////////////////////////////////////////
+	// 用户实验模式下的力-位移控制
+	/////////////////////////////////////////////////////////////////////////
+	// 获取触觉设备的交互力（全局坐标系）
+	cVector3d interactionForce = tool->getDeviceGlobalForce();
+
+	// 力到位移映射参数
+	static const double forceToDisplacementScale = 0.001; // 1N -> 1mm位移
+	static const double maxDisplacement = 0.01; // 最大位移10mm
+	static const double forceDeadZone = 0.1; // 力的死区 0.1N
+
+	// 应用死区处理
+	double forceMagnitude = interactionForce.length();
+	if (forceMagnitude < forceDeadZone) {
+		interactionForce.zero();
+	}
+
+	// 力到位移的线性映射
+	cVector3d tipDisplacement = interactionForce * forceToDisplacementScale;
+
+	// 限制最大位移
+	double displacementMagnitude = tipDisplacement.length();
+	if (displacementMagnitude > maxDisplacement) {
+		tipDisplacement.normalize();
+		tipDisplacement *= maxDisplacement;
+	}
+
+	// 获取基准位置（软体机器人的自然零位）
+	static cVector3d baseTipPosition(0.0, 0.0, ResolvedRateControl.h_0 * 0.001);
+
+	// 计算目标tip位置
+	cVector3d targetTipPosition = baseTipPosition + tipDisplacement;
+
+	// 通过PCC模型计算所需压力
+	cVector3d targetPosMM = targetTipPosition * 1000; // 转换为mm
+
+	// 使用运动学模型计算压力
+	auto result = ResolvedRateControl.updateMotion(presCurr, targetPosMM);
+	cVector3d modeledPosition = result[0];
+	cVector3d newPressure = result[1];
+
+	// 发送压力到Arduino
+	std::string sendStr = newPressure.str();
+	arduinoWriteData(50, sendStr);
+	presCurr = newPressure;
+
+	// 单行实时调试输出
+	std::cout << std::fixed << std::setprecision(2)
+		<< "[EXP] Force:" << interactionForce.str(2) << "N "
+		<< "Disp:" << (tipDisplacement * 1000).str(1) << "mm "
+		<< "Target:" << targetTipPosition.str(3) << "m "
+		<< "Press:" << newPressure.str(1) << "kPa "
+		<< "Touch:L=" << (currentlyTouchingLeft ? "Y" : "N")
+		<< ",R=" << (currentlyTouchingRight ? "Y" : "N") << "    \r";
+}
+else if (!experimentMode) {
+	// 非实验模式时隐藏立方体
+	if (leftCube) leftCube->setEnabled(false);
+	if (rightCube) rightCube->setEnabled(false);
+
+	/////////////////////////////////////////////////////////////////////////
+	// 表征模式：保持原有的轨迹跟踪控制
+	/////////////////////////////////////////////////////////////////////////
+	if (!hasInitPress) {
+		presCurr = ResolvedRateControl.m_initPressure;
+		hasInitPress = true;
+	}
+
+	cVector3d targetPos = TrajTarget * 1000; // 目标轨迹位置
+	auto result = ResolvedRateControl.updateMotion(presCurr, targetPos);
+	chai3d::cVector3d newPos = result[0];
+	chai3d::cVector3d newPressure = result[1];
+	double error = (newPos - targetPos).length();
+
+	if (error < 0.1) {
+		cVector3d PressuretoArduino = presCurr;
+		std::string sendStr = PressuretoArduino.str();
+		arduinoWriteData(50, sendStr);
+	}
+	else {
+		presCurr = newPressure;
+	}
+
+	// 表征模式调试输出
+	// 表征模式单行调试输出
+	//std::cout << std::fixed << std::setprecision(2)
+	//	<< "[CHAR] Target:" << targetPos.str(1) << "mm "
+	//	<< "Current:" << newPos.str(1) << "mm "
+	//	<< "Error:" << error << "mm "
+	//	<< "Press:" << presCurr.str(1) << "kPa "
+	//	<< "Traj:" << TrajTarget.str(3) << "m    \r";
+}
+else {
+	// 实验模式但无活跃试次时隐藏立方体
+	if (leftCube) leftCube->setEnabled(false);
+	if (rightCube) rightCube->setEnabled(false);
+}
 
 		/////////////////////////////////////////////////////////////////////////
 		// HAPTIC MANIPULATION
@@ -2911,6 +3375,9 @@ static inline void mulRT(const double R[9], const double v[3], double o[3])
 
 bool mtZeroMarkers(mtw::MicronTracker& MT, double h0_mm)
 {
+	std::cout << "[MT] Starting zero calibration with markers: finger, actuator..." << std::endl;
+	std::cout << "[MT] h0_mm = " << h0_mm << std::endl;
+
 	// 1) 更新一帧，确保识别成功
 	if (!MT.update())
 	{
@@ -2918,43 +3385,58 @@ bool mtZeroMarkers(mtw::MicronTracker& MT, double h0_mm)
 		return false;
 	}
 
-	// 2) 读取 fr / Actuator 的绝对姿态
+	// 2) 读取 finger / actuator 的绝对姿态，添加详细调试
 	mtw::Pose fr, act;
-	if (!MT.getPoseAndRotMat("fr", fr) ||
-		!MT.getPoseAndRotMat("Actuator", act))
+	bool frOK = MT.getPoseAndRotMat("finger", fr);
+	bool actOK = MT.getPoseAndRotMat("actuator", act);
+
+	std::cout << "[MT] Marker detection: finger=" << (frOK ? "OK" : "FAIL")
+		<< ", actuator=" << (actOK ? "OK" : "FAIL") << std::endl;
+
+	if (!frOK || !actOK)
 	{
 		std::cerr << "[MT] pose query failed – cannot zero\n";
+		std::cerr << "[MT] Make sure both 'finger' and 'actuator' markers are visible and recognized\n";
 		return false;
 	}
 
-	// 3) 当前 Actuator 在 fr 坐标系下的位置、姿态
+	// 打印绝对位姿信息
+	std::cout << "[MT] finger pos: (" << fr.pos[0] << ", " << fr.pos[1] << ", " << fr.pos[2] << ") mm" << std::endl;
+	std::cout << "[MT] actuator pos: (" << act.pos[0] << ", " << act.pos[1] << ", " << act.pos[2] << ") mm" << std::endl;
+
+	// 3) 当前 actuator 在 finger 坐标系下的位置、姿态
 	double relPosNow[3];
-	if (!MT.getRelPos("Actuator", "fr", relPosNow))
+	if (!MT.getRelPos("actuator", "finger", relPosNow))
 	{
-		std::cerr << "[MT] getRelPos(Actuator,fr) failed – cannot zero\n";
+		std::cerr << "[MT] getRelPos(actuator,finger) failed – cannot zero\n";
 		return false;
 	}
 
 	double relRNow[9];
-	if (!MT.getRelRotMat("Actuator", "fr", relRNow))
+	if (!MT.getRelRotMat("actuator", "finger", relRNow))
 	{
-		std::cerr << "[MT] getRelRotMat(Actuator,fr) failed – cannot zero\n";
+		std::cerr << "[MT] getRelRotMat(actuator,finger) failed – cannot zero\n";
 		return false;
 	}
 
+	std::cout << "[MT] Relative position (actuator->finger): ("
+		<< relPosNow[0] << ", " << relPosNow[1] << ", " << relPosNow[2]
+		<< ") mm" << std::endl;
+
 	// 4) 保存基准 --------------------------------------------------
-	/* (1) fr / Actuator 绝对姿态 */
+/* (1) fr / Actuator 绝对姿态 */
 	for (int i = 0; i < 3; ++i) {
 		g_mtZero.frPos[i] = fr.pos[i];
-		g_mtZero.actPos[i] = act.pos[i];
+		g_mtZero.actPos[i] = act.pos[i];  // ★ 确保这行存在
 	}
 	for (int i = 0; i < 9; ++i) {
 		g_mtZero.frR[i] = fr.rot[i];
-		g_mtZero.actR[i] = act.rot[i];
+		g_mtZero.actR[i] = act.rot[i];    // ★ 确保这行存在
 	}
 
 	// 计算 R0（零点姿态）的 z-轴向量（列 2）
 	double z0[3] = { relRNow[6], relRNow[7], relRNow[8] };   // col-major → 第 3 列
+	std::cout << "[MT] Z-axis vector: (" << z0[0] << ", " << z0[1] << ", " << z0[2] << ")" << std::endl;
 
 	// t_off = relPosNow - R0 · (0,0,h0)
 	g_mtZero.relPosOff[0] = relPosNow[0] - h0_mm * z0[0];
@@ -2967,10 +3449,14 @@ bool mtZeroMarkers(mtw::MicronTracker& MT, double h0_mm)
 
 	g_mtZero.valid = true;
 
-	std::cout << "[MT] zero done.\n"
+	std::cout << "[MT] zero done successfully!\n"
+		<< "   finger saved at: (" << g_mtZero.frPos[0] << ", "
+		<< g_mtZero.frPos[1] << ", " << g_mtZero.frPos[2] << ") mm\n"
+		<< "   actuator saved at: (" << g_mtZero.actPos[0] << ", "
+		<< g_mtZero.actPos[1] << ", " << g_mtZero.actPos[2] << ") mm\n"
 		<< "   relPosOff = (" << g_mtZero.relPosOff[0] << ", "
-		<< g_mtZero.relPosOff[1] << ", "
-		<< g_mtZero.relPosOff[2] << ") mm\n";
+		<< g_mtZero.relPosOff[1] << ", " << g_mtZero.relPosOff[2] << ") mm\n";
+
 	return true;
 }
 
