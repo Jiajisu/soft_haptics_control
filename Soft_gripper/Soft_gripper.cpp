@@ -14,18 +14,7 @@
 #include <chrono>
 #include <thread>
 #include <mutex>
-//------------------------------------------------------------------------------
-// Pohelmus
-//------------------------------------------------------------------------------
-#include <cstdio>
-#include <cstdlib>
-#include "VPcmdIF.h"
-#include "VPtrace.h"
-#include <string>
-#include <iostream>
-#include <iomanip>  // for std::setw
-#define POLHEMUS_VID 0x0f44
-#define VIPER_PID	0xBF01
+
 
 //------------------------------------------------------------------------------
 // MTW
@@ -38,7 +27,6 @@ using namespace std;
 // Self Define functions 
 //------------------------------------------------------------------------------
 
-#include "frameTrans.hpp"
 #include "ControlPCC.hpp"
 #include "TrajectoryGenerator.hpp"
 #include "TimeUtil.hpp"
@@ -58,6 +46,7 @@ cShapeCylinder* cylinderTopRel = nullptr;
 //------------------------------------------------------------------------------
 // 用户实验管理
 //------------------------------------------------------------------------------
+
 UserStudyManager* userStudy = nullptr;
 bool experimentMode = false;  // 切换实验模式的标志
 
@@ -115,7 +104,6 @@ chai3d::cVector3d PressuretoArduino;
 int circleIndex = 0;
 int pointIndex = 10;
 double duration = 14.0;         // total movement time
-static bool g_doBoresight = false;
 static bool g_trajectoryStarted = false;
 static double g_trajectoryStartTime = 0.0;
 // This accumulator persists across multiple calls to updateHaptics
@@ -174,6 +162,24 @@ cShapeSphere* sphereTop = nullptr;       // 黄色 - 计算得到的top
 
 // 显示控制标志
 bool g_showCalibrationSpheres = false;
+
+
+//--------------------------------------------------------------
+//  Base Marker 参考系
+//--------------------------------------------------------------
+struct BaseReferenceFrame
+{
+	// base marker在相机坐标系下的位姿
+	double basePos[3]{};     // 位置 (mm)
+	double baseR[9]{};       // 旋转矩阵 (col-major)
+
+	// base到虚拟环境的变换（用户配置）
+	double ve_offset[3]{ 0.0, 0.0, 0.0 };  // 平移偏移
+	double ve_scale = 1.0;               // 缩放因子
+
+	bool valid{ false };
+} g_baseRef;
+
 
 //------------------------------------------------------------------------------
 // Calibration相关变量
@@ -338,80 +344,8 @@ void openCSV(const std::string& filename);
 void writeToCSV(const std::vector<string>& row);
 void closeCSV();
 
-
-// 在现有全局变量声明后添加
-//std::ofstream experimentCsvFile;  // 新增：实验模式专用CSV文件
-//
-//bool recordExperimentDataToCSV = false;  // 新增：实验数据记录开关
 std::string currentCsvType = "characterization"; // "characterization" 或 "experiment"
 
-//// 在现有函数声明后添加
-//void openExperimentCSV(const std::string& filename);
-//void writeExperimentDataToCSV(int userChoice, double refStiffness, double compStiffness, double reactionTime);
-//void closeExperimentCSV();
-
-//================================Polhemus======================================
-#include <cstdio>
-#include <cstdlib>
-#include "VPcmdIF.h"
-#include "VPtrace.h"
-#include <string>
-#include <iostream>
-#include <iomanip>  // for std::setw
-#define POLHEMUS_VID 0x0f44
-#define VIPER_PID	0xBF01
-enum {
-	VIPER_TRACKER
-	//, LIBERTY_TRACKER
-	//, FASTRAK3_TRACKER
-
-	, TRACKER_MAX
-
-}eTracker;
-vpcmd_context g_ctx;
-vpdev_hnd     g_hnd;
-uint16_t g_vid = POLHEMUS_VID;
-uint16_t g_pid = VIPER_PID;
-int32_t g_TrackerType = VIPER_TRACKER;
-int		   g_TraceLevel = VPCMD_TRACE_3_NORMALIO;
-int		   g_bTraceMode = true;
-UNITS_CONFIG config;
-typedef int (*usbcnxfunc)(vpcmd_context, vpdev_hnd&, uint16_t);
-struct _cnx_fxn_info
-{
-	usbcnxfunc func;
-	const char* szfunc;
-};
-_cnx_fxn_info usbcnx_fxn_info[TRACKER_MAX] =
-{
-	vpctx_connectusb, "vpctx_connectusb",
-};
-
-typedef struct _MYPNO {
-	SEUPNO seupno;
-	SENFRAMEDATA sarr[SENSORS_PER_SEU];
-}MYPNOTYPE;
-
-vpFrameInfo f;	///frame structs
-CFrameRateCfg g_cfrate;
-// 用于记录“在按下 boresightSensor1() 时，传感器1的当前位置”
-// 后续循环把该值作为 offset，令后续 pos - g_posOffset => 位置归零
-cVector3d g_posOffset(0.0, 0.0, 0.0);
-
-/****************************************************************************
-Function Identifier
- ****************************************************************************/
-bool Connect();
-void Disconnect();
-void DisplaySEUs();
-void DisplayError(int32_t err, const char* szMsg);
-bool StartCont();
-bool StopCont();
-bool boresightSensor1();
-bool boresightSensor2();
-bool clearBoresightSensor1();
-PNODATA GrabFramePNO(MYPNOTYPE* pv, uint32_t s_index);
-double getCurrentTime();
 
 //==============================================================================
 /*
@@ -1002,77 +936,11 @@ int main(int argc, char* argv[])
 	//--------------------------------------------------------------------------
 	// START SIMULATION
 	//--------------------------------------------------------------------------
-	//
-	Connect();
-	// 先设置帧率到30Hz
-	CFrameRateCfg cfrate;
-	int rr = vpcmd_dev_framerate(g_ctx, g_hnd, CMD_ACTION_GET, cfrate);
-	if (rr != 0) {
-		DisplayError(rr, "vpcmd_dev_framerate GET");
-	}
-	else {
-		cfrate.frame_rate = FR_60;  // FR_30即枚举0,表示 30Hz
-		rr = vpcmd_dev_framerate(g_ctx, g_hnd, CMD_ACTION_SET, cfrate);
-		if (rr != 0) {
-			DisplayError(rr, "vpcmd_dev_framerate SET to 60Hz");
-		}
-		else {
-			std::cout << "Frame rate set to 60Hz.\n";
-		}
-	}
-	config.pos_units = POS_CM;
-	config.ori_units = ORI_QUATERNION;
-	vpcmd_dev_units(g_ctx, g_hnd, CMD_ACTION_SET, &config);
-	StartCont();
-	// create a thread which starts the main haptics rendering loop
 	hapticsThread = new cThread();
 	hapticsThread->start(updateHaptics, CTHREAD_PRIORITY_HAPTICS);
-
-
-	// 1) 让 Polhemus 内部输出连续 PNO 数据
-	//int r = vpcmd_dev_contpno(g_ctx, g_hnd, CMD_ACTION_SET);
-	//if (r != 0) {
-	//	DisplayError(r, "vpcmd_dev_contpno SET");
-	//}
-
-	// 3) 如果想要 Polhemus 给每帧打上时间戳，则启用 time-stamp
-	//    viper 提供 vpdev_tsenable(...) 
-	bool wantViperTimestamp = true;
-	vpdev_tsenable(g_ctx, g_hnd, wantViperTimestamp);
-
-
-	int sensorAll = VP_ID_ALL;  // = -1 => 对所有传感器生效
-
-	// a) 位置(Position)滤波 => Light
-	{
-		CFilterCfg filterLightPos;
-		filterLightPos.Fill(FILTER_LVL_LIGHT);
-		vpcmd_sns_filter(g_ctx, g_hnd, sensorAll, CMD_ACTION_SET, &filterLightPos, FILTER_TRGT_POS);
-
-	}
-
-	// b) 姿态(Orientation)滤波 => Light
-	{
-		CFilterCfg filterLightOri;
-		filterLightOri.Fill(FILTER_LVL_LIGHT);
-		vpcmd_sns_filter(g_ctx, g_hnd, sensorAll, CMD_ACTION_SET, &filterLightOri, FILTER_TRGT_ORI);
-
-	}
-
+	std::cout << "[Haptics] thread started.\n";
 	//-------------------------------------------
-	// 2) 打开预测滤波，并设参数为默认值(20ms 等)
-	//-------------------------------------------
-	{
-		PF_CONFIG predCfg;
-		memset(&predCfg, 0, sizeof(predCfg));
-		predCfg.qFil_on = 1;     // 开启姿态预测
-		predCfg.rFil_on = 1;     // 开启位置预测
-		predCfg.predTimeS = 0.02f; // 20毫秒
-		vpcmd_sns_predfilter(g_ctx, g_hnd, sensorAll, CMD_ACTION_SET, &predCfg);
-
-	}
-	//-------------------------------------------
-	// 2) Turn on micron tracker
+	// 1) Turn on micron tracker
 	//-------------------------------------------
 	try {
 		MT.init();                       // 保留原调用
@@ -1123,9 +991,6 @@ int main(int argc, char* argv[])
 
 	// terminate GLFW library
 	glfwTerminate();
-	StopCont();
-	Disconnect();
-	Disconnect();
 	// exit
 	return (0);
 }
@@ -1206,27 +1071,6 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 		mirroredDisplay = !mirroredDisplay;
 		camera->setMirrorVertical(mirroredDisplay);
 	}
-	//Press R for turn off boresight (just read raw data) 
-	else if (a_key == GLFW_KEY_R)
-	{
-		clearBoresightSensor1();
-
-	}
-	//Press B for boresight the sensor 1 to (0,0,0) (0,0,0,1)
-	else if (a_key == GLFW_KEY_B)
-	{
-		// call boresight sensor1
-		g_doBoresight = true;
-		g_doMTZero = true;
-		std::cout << "[INFO] boresight requested.\n";
-
-
-	}
-	//else if (a_key == GLFW_KEY_I)
-	//{
-	//	sendPosToArduino = !sendPosToArduino;
-	//	cout << "Sending Position Info to Arduino: " << sendPosToArduino << endl;
-	//}
 	else if (a_key == GLFW_KEY_O)
 	{
 		if (experimentMode) {
@@ -1296,6 +1140,17 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 		std::cout << "[INFO] Control started at time="
 			<< g_controlStartTime << std::endl;
 		}
+	else if (a_key == GLFW_KEY_B)
+	{
+		// 调零功能
+		if (g_mtAvailable) {
+			g_doMTZero = true;  // 设置调零标志，MTLoop会检测并执行
+			std::cout << "[Main] Triggering MT zero calibration..." << std::endl;
+		}
+		else {
+			std::cout << "[Main] MT not available, cannot perform zero calibration" << std::endl;
+		}
+}
 		// 在现有按键处理后添加
 	else if (a_key == GLFW_KEY_E)
 	{
@@ -1821,93 +1676,83 @@ void updateHaptics(void)
 	cMode state = IDLE;
 	cGenericObject* object = NULL;
 	cTransform tool_T_object;
-	//add top and bot cap
-	double radius = 0.005; // 12mm
-	double height = 0.001; // 3mm
-	// 改为：
-	if (!cylinderTop) {
-		cylinderTop = new cShapeCylinder(radius, radius, height);
-		cylinderTop->m_material->setRed();
+	// ★ 添加这三行声明
+	PNODATA pno_1{};           // 用于存储finger marker数据
+	PNODATA pno_2{};           // 用于存储actuator marker数据  
+	PNODATA sensor2CrctPNO{};  // 用于存储相对位姿数据
+
+	// ========== 初始化部分（只执行一次）==========
+	static bool hapticsInitialized = false;
+	if (!hapticsInitialized) {
+		// add top and bot cap
+		double radius = 0.005; // 5mm
+		double height = 0.001; // 1mm
+
+		// 创建 cylinderTop
+		if (!cylinderTop) {
+			cylinderTop = new cShapeCylinder(radius, radius, height);
+			cylinderTop->m_material->setGreen();
+			// 注意：cylinderTop 不添加到 world（根据你的原代码）
+		}
+
+		// 创建 cylinderBot
+		if (!cylinderBot) {
+			cylinderBot = new cShapeCylinder(radius, radius, height);
+			cylinderBot->m_material->setRed();
+			world->addChild(cylinderBot);
+		}
+
+		// 创建 cylinderTopRel
+		double relRadius = 0.005;
+		double relHeight = 0.001;
+		if (!cylinderTopRel) {
+			cylinderTopRel = new cShapeCylinder(relRadius, relRadius, relHeight);
+			cylinderTopRel->m_material->setGreenForest();
+			cylinderTopRel->setLocalPos(0, 0, 0.0);
+			world->addChild(cylinderTopRel);
+		}
+
+		// 创建 sphereTarget
+		double sphereRadius = 0.0025; // 小球半径
+		if (!sphereTarget) {
+			sphereTarget = new cShapeSphere(sphereRadius);
+			sphereTarget->m_material->setBlueCornflower();
+			sphereTarget->m_material->setTransparencyLevel(0.6);
+			sphereTarget->setUseTransparency(true);
+			world->addChild(sphereTarget);
+		}
+
+		hapticsInitialized = true;
 	}
-	if (!cylinderBot) {
-		cylinderBot = new cShapeCylinder(radius, radius, height);
-		world->addChild(cylinderBot);
-	}
 
-	//world->addChild(cylinderTop);
-	world->addChild(cylinderBot);
-
-	cylinderTop->m_material->setRed();
-
-	//double relRadius = 0.012;
-	//double relHeight = 0.0035;
-	double relRadius = 0.005;
-	double relHeight = 0.001;
-	// 同样修改 cylinderTopRel
-	if (!cylinderTopRel) {
-		cylinderTopRel = new cShapeCylinder(relRadius, relRadius, relHeight);
-		world->addChild(cylinderTopRel);
-		cylinderTopRel->m_material->setGreenForest();
-		cylinderTopRel->setLocalPos(0, 0, 0.0);
-	}
-	world->addChild(cylinderTopRel);
-
-
-	cylinderTopRel->m_material->setGreenForest();
-	cylinderTopRel->setLocalPos(0, 0, 0.0); // 先往 X 方向左移
-
-	double sphereRadius = 0.0025; // 小球半径 (可根据需要调整)
-	// 修改 sphereTarget
-	if (!sphereTarget) {
-		sphereTarget = new cShapeSphere(sphereRadius);
-		sphereTarget->m_material->setBlueCornflower();
-		sphereTarget->m_material->setTransparencyLevel(0.6);
-		sphereTarget->setUseTransparency(true);
-		world->addChild(sphereTarget);
-	}
-
-	// 设置材质或颜色
-	sphereTarget->m_material->setBlueCornflower(); // 示例颜色
-	sphereTarget->m_material->setTransparencyLevel(0.6);  // 半透明 (0.0 ~ 1.0)
-	sphereTarget->setUseTransparency(true); // 启用透明效果
-
-	// 将小球添加到场景
-	world->addChild(sphereTarget);
+	// ========== 以下是需要每次循环都执行的代码 ==========
 
 	// generate targets on circles
-	//  1) r=3.5, center=(0,0,19.5)
-	//  2) r=5.0, center=(0,0,21.5)
-	//  3) r=3.0, center=(0,0,24.5)
 	std::vector<TrajectoryGenerator::CircleDefinition> circles = {
-		{0.0035, chai3d::cVector3d(0.0, 0.0, ResolvedRateControl.h_0 * 0.001+ 0.003)},
+		{0.0035, chai3d::cVector3d(0.0, 0.0, ResolvedRateControl.h_0 * 0.001 + 0.003)},
 		{0.0045, chai3d::cVector3d(0.0, 0.0, ResolvedRateControl.h_0 * 0.001 - 0.006)},
-		{0.0055, chai3d::cVector3d(0.0, 0.0, ResolvedRateControl.h_0 *0.001 -0.0012)}
+		{0.0055, chai3d::cVector3d(0.0, 0.0, ResolvedRateControl.h_0 * 0.001 - 0.0012)}
 	};
 
-	// number of traget points on the circle
 	int points = 12;
-
-
-	// 调用函数，得到一个二维容器
-	// outer.size()=3, each inner.size()=12
 	std::vector<std::vector<chai3d::cVector3d>> allCircles =
 		TrajectoryGenerator::generateMultipleCirclesPoints(circles, points);
+
 	cVector3d startPos(0.0, 0.0, ResolvedRateControl.h_0 * 0.001);
-	
-	// 我们定义一个“sensor2PosOffset”，用于让 sensor2 在无驱动时变成 (0,0,h_0)
+
+	// 我们定义一个"sensor2PosOffset"，用于让 sensor2 在无驱动时变成 (0,0,h_0)
 	static cVector3d sensor2PosOffset(0.0, 0.0, 0.0);
 
 	chai3d::cVector3d PointOnCir = allCircles[circleIndex][pointIndex];
 
-
 	static const chai3d::cVector3d center(0.0, 0.0, ResolvedRateControl.h_0 * 0.001);   // 起始点
-	//static const chai3d::cVector3d amp    (0.00, 0.00001, 0.003); // 幅值: ±3 mm, ±2 mm, ±1 mm
-	static const chai3d::cVector3d amp    (0.002, 0.000, 0.00); // 幅值: ±3 mm, ±2 mm, ±1 mm
-	double freq = 1;                      // 5 Hz 带宽测试
+	static const chai3d::cVector3d amp(0.002, 0.000, 0.00); // 幅值
+	double freq = 1;                      // 1 Hz 带宽测试
 
 	// simulation in now running
 	simulationRunning = true;
 	simulationFinished = false;
+
 	// main haptic simulation loop
 	while (simulationRunning)
 	{
@@ -1922,18 +1767,6 @@ void updateHaptics(void)
 		world->computeGlobalPositions(true);
 
 		// update position and orientation of tool
-
-		PNODATA pno_1;
-		PNODATA pno_2;
-		PNODATA pno2_in_sensor1_frame;
-		// 1) 读取 Polhemus FIFO 的下一帧
-		vpFrameInfo f;
-		//  vpcmd_context g_ctx;   // 你的全局/外部变量
-		//  vpdev_hnd     g_hnd;   // 同上
-		//vpctx_dev_fifopnof(g_ctx, g_hnd, f);
-		//READ LAST PNO DATA
-		 vpctx_dev_lastpnof(g_ctx, g_hnd, f);
-
 
 
 
@@ -2054,48 +1887,11 @@ void updateHaptics(void)
 		{
 			presCurr = newPressure; 
 		}
-		//------------------------------------------------------------
-		// 0) 采集新帧
-		//------------------------------------------------------------
-		//if (!MT.update()) {
-		//	std::cerr << "[MT] update failed, skip\n";
-		//	continue;
-		//}
 
 		////------------------------------------------------------------
 		//// 1) 读取 fr / Actuator 位姿，先检查返回值
 		////------------------------------------------------------------
 		mtw::Pose fr, act;
-		//bool okFr = MT.getPoseAndRotMat("fr", fr);
-		//bool okAct = MT.getPoseAndRotMat("Actuator", act);
-
-		//if (!okFr) {                                    // 没有 fr → 本帧无效
-		//	std::cerr << " fr lost, skip frame\n";
-		//	continue;
-		//}
-
-		////------------------------------------------------------------
-		//// 2) 首次调零（只做一次）
-		////------------------------------------------------------------
-		//if (g_doMTZero) {
-		//	const double h0_mm = 29.45;
-		//	if (mtZeroMarkers(MT, h0_mm))
-		//		std::cout << "[MT] zero done\n";
-		//	g_doMTZero = false;
-		//}
-
-		////------------------------------------------------------------
-		//// 3) 相对位姿（只有 okAct 时才计算）
-		////------------------------------------------------------------
-		//double relPos[3] = { 0 }, relRot[9];        // 初始化
-		//bool   okRel = false;
-
-		//if (okAct &&
-		//	MT.getRelPos("Actuator", "fr", relPos) &&
-		//	MT.getRelRotMat("Actuator", "fr", relRot))
-		//{
-		//	okRel = true;
-		//}
 		//――――― 读取最新快照（非阻塞，仅拷贝一次）―――――
 		MTPoseSnapshot snap;
 		if (g_mtAvailable) {
@@ -2230,17 +2026,6 @@ void updateHaptics(void)
 		tool->updateToolImagePosition();  // 更新tool图像位置
 		tool->computeInteractionForces(); // 重新计算交互力
 
-		//// 添加调试输出确认tool位置更新
-		//static int toolDebugCount = 0;
-		//if (++toolDebugCount % 60 == 0) {
-		//	std::cout << "[TOOL DEBUG] Setting tool to finger pos: " << posFrM.str()
-		//		<< " (from finger: " << frZeroPos[0] << "," << frZeroPos[1] << "," << frZeroPos[2] << "mm)" << std::endl;
-
-		//	// 验证tool位置是否真的被设置了
-		//	cVector3d currentToolPos = tool->getDeviceLocalPos();
-		//	std::cout << "[TOOL VERIFY] Current tool pos: " << currentToolPos.str() << std::endl;
-		//}
-
 		// -- rel (仅当 okRel && g_mtZero.valid) --
 		if (okRel && g_mtZero.valid)
 		{
@@ -2259,16 +2044,8 @@ void updateHaptics(void)
 			cylinderTopRel->setLocalPos(posRelM);
 			cylinderTopRel->setLocalRot(rotRelM);
 
-			PNODATA sensor2CrctPNO{};
 			if (okRel && g_mtZero.valid)
 			{
-				//double posRel[3] = { relPos[0], relPos[1], relPos[2] };   // mm
-				//double RRel[9] = { relRot[0], relRot[1], relRot[2],
-				//					 relRot[3], relRot[4], relRot[5],
-				//					 relRot[6], relRot[7], relRot[8] };
-
-
-
 
 		//--------------------------------------------------------------------
 		// 7)  构造 PNODATA
@@ -2302,14 +2079,6 @@ void updateHaptics(void)
 
 				sensor2CrctPNO = makePNO_mm_colRM(posRel, RRel);
 			}
-
-	
-			//std::cout << std::fixed << std::setprecision(2)
-			//	<< "[relZeroPos] (" << relZeroPos[0] << ", "
-			//	<< relZeroPos[1] << ", "
-			//	<< relZeroPos[2] << ") mm    "
-			//	<< "MicronTracker FPS = "
-			//	<< std::setprecision(1) << MT.getFPS() << " Hz\r";
 
 			//------------------------------P to L model---------------------------------
 
@@ -2566,234 +2335,6 @@ if (g_showCalibrationSpheres && snap.haveFr && snap.haveAct) {
 	}
 }
 
-
-
-		//------------------------------------------------------------
-		// 5) 打印（可选）——确认调零后数值是否有限
-		//------------------------------------------------------------
-		//if (!std::isfinite(frZeroPos[0])) {
-		//	std::cerr << " Invalid data detected, skip frame\n";
-		//	continue;
-		//}
-
-
-		//std::cout << std::fixed << std::setprecision(2)
-		//	<< "[sensor2CrctPNOArc] (" << sensor2CrctPNO.pos[0] << ", "
-		//	<< sensor2CrctPNO.pos[1] << ", "
-		//	<< sensor2CrctPNO.pos[2] << ") mm   \r ";
-
-
-
-
-
-
-		// 
-			// 2) 检查 f.uiSize 是否有数据
-			/*
-			if (f.uiSize > 0 && f.pF != nullptr)
-			{
-				// f.ts 就是时间戳(微秒级或根据 Polhemus 版本)
-				// 只有 wantTimestamp = true 时才有意义
-				uint64_t ViperTimestamp = f.ts;
-
-				//// 3) 解析传感器数据
-				//if ((MYPNOTYPE*)&(f.pF)[0])
-				//{
-					// a) Sensor1 (cylinderBot)
-					pno_1 = GrabFramePNO((MYPNOTYPE*)&(f.pF)[0], 0);
-					double C3Dscale = 0.01; // cm->m
-					double Arcscale = 10; // cm->mm
-					cVector3d C3DPos1(
-						pno_1.pos[0] * C3Dscale,
-						pno_1.pos[1] * C3Dscale,
-						pno_1.pos[2] * C3Dscale
-					);
-					cVector3d relPos1 = C3DPos1 - g_posOffset;
-					cQuaternion q1(pno_1.ori[0], pno_1.ori[1], pno_1.ori[2], pno_1.ori[3]);
-					cMatrix3d r1 = quaternionToMatrix(q1);
-
-					cylinderBot->setLocalPos(relPos1);
-					cylinderBot->setLocalRot(r1);
-
-					// b) Sensor2 (cylinderTop)
-					pno_2 = GrabFramePNO((MYPNOTYPE*)&(f.pF)[0], 1);
-					cVector3d C3DPos2(
-						pno_2.pos[0] * C3Dscale,
-						pno_2.pos[1] * C3Dscale,
-						pno_2.pos[2] * C3Dscale
-					);
-					cVector3d relPos2 = C3DPos2 - g_posOffset;
-					cQuaternion q2(pno_2.ori[0], pno_2.ori[1], pno_2.ori[2], pno_2.ori[3]);
-					cMatrix3d r2 = quaternionToMatrix(q2);
-					cVector3d sensor2FinalPos = relPos2 - sensor2PosOffset;
-					cylinderTop->setLocalPos(sensor2FinalPos);
-					cylinderTop->setLocalRot(r2);
-
-					PNODATA sensor1finalPNO = pno_1;          // 复制
-					sensor1finalPNO.pos[0] = relPos1.x() / C3Dscale; // 若保持 cm
-					sensor1finalPNO.pos[1] = relPos1.y() / C3Dscale;
-					sensor1finalPNO.pos[2] = relPos1.z() / C3Dscale;
-					PNODATA sensor2finalPNO = pno_2;          // 复制
-					sensor2finalPNO.pos[0] = sensor2FinalPos.x() / C3Dscale; // 若保持 cm
-					sensor2finalPNO.pos[1] = sensor2FinalPos.y() / C3Dscale;
-					sensor2finalPNO.pos[2] = sensor2FinalPos.z() / C3Dscale;
-
-
-
-					//std::cout << "relPos1 " << sensor1finalPNO.pos[0] << "   sensor2FinalPos: " << sensor1finalPNO.pos[0] << std::endl;
-
-
-
-					// c) 计算 sensor2 相对于 sensor1 的位置和姿态
-					PNODATA pno2_in_sensor1_frame = convertToSensor1Frame(sensor1finalPNO, sensor2finalPNO);
-
-
-					cVector3d sensor2RelPosC3D(
-						pno2_in_sensor1_frame.pos[0] * C3Dscale,
-						pno2_in_sensor1_frame.pos[1] * C3Dscale,
-						pno2_in_sensor1_frame.pos[2] * C3Dscale
-					);  
-					cQuaternion q2_rel(
-						pno2_in_sensor1_frame.ori[0],
-						pno2_in_sensor1_frame.ori[1],
-						pno2_in_sensor1_frame.ori[2],
-						pno2_in_sensor1_frame.ori[3]
-					);
-					cMatrix3d r2_rel = quaternionToMatrix(q2_rel);
-
-					cVector3d shift(0.0, 0.03, 0.0);
-					cVector3d finalPosRel = shift + sensor2RelPosC3D;
-					cylinderTopRel->setLocalPos(finalPosRel);
-					cylinderTopRel->setLocalRot(r2_rel);
-
-					PNODATA sensor2CrctPNOArc;
-					sensor2CrctPNOArc.pos[0] = pno2_in_sensor1_frame.pos[0] * 10; //mm
-					sensor2CrctPNOArc.pos[1] = pno2_in_sensor1_frame.pos[1] * 10;
-					sensor2CrctPNOArc.pos[2] = pno2_in_sensor1_frame.pos[2] * 10;
-					sensor2CrctPNOArc.ori[0] = pno2_in_sensor1_frame.ori[0];
-					sensor2CrctPNOArc.ori[1] = pno2_in_sensor1_frame.ori[1];
-					sensor2CrctPNOArc.ori[2] = pno2_in_sensor1_frame.ori[2];
-					sensor2CrctPNOArc.ori[3] = pno2_in_sensor1_frame.ori[3];
-
-
-					// 检查是否需要 boresight
-					if (g_doBoresight)
-					{
-						boresightSensor1(); // 这里执行你的 boresight 函数
-						boresightSensor2();
-						sensor2PosOffset = relPos2 - cVector3d(0, 0, ResolvedRateControl.h_0 * 0.001);
-
-						std::cout << "[INFO] sensor2PosOffset => "
-							<< sensor2PosOffset.str() << std::endl;
-
-						g_doBoresight = false;
-					}
-
-					std::cout <<  "   RELPos: " << sensor2CrctPNOArc.pos[0] << ", " << sensor2CrctPNOArc.pos[1] << ", " << sensor2CrctPNOArc.pos[2] << std::endl;
-
-					//------------------------------Close loop Control---------------------------
-					//------------------------------P to L model---------------------------------
-
-					cVector3d targetPos = TrajTarget * 1000;  // 目标位置 (mm)
-					if (g_enableControl)
-					{
-						auto result = ResolvedRateControl.updateMotionCloseLoop(targetPos, sensor2CrctPNOArc);
-						//std::cout << "   RELPos: " << targetPos << "   RELPos: " << sensor2CrctPNOArc.pos[0] << ", " << sensor2CrctPNOArc.pos[1] << ", " << sensor2CrctPNOArc.pos[2] << std::endl;
-						cVector3d newPos = result[0];       // 计算的新位置
-						cVector3d newPressure = result[1];  // 计算的新压力
-						double error = (newPos - targetPos).length();
-						//std::cout << "Error: " << error << " = " << newPos << " - " << targetPos << std::endl;
-						//std::cout << "newpos " << newPos << std::endl;
-					
-							//if (error < 1)
-							//{
-								cVector3d PressuretoArduino = presCurr;
-								//cVector3d PressuretoArduino(20,20,20);
-								std::string sendStr = PressuretoArduino.str();
-								arduinoWriteData(50, sendStr);
-								//std::cout << "sendStr: "
-								//	<< sendStr << "\r";
-							//}
-							//else
-							//{
-								presCurr = newPressure; // 
-							//}
-					}
-					else
-					{
-						std::string sendZero = ZeroPressure.str();
-						arduinoWriteData(50, sendZero);
-					}
-			    //------------------------------------PID------------------------------------
-
-
-
-
-				// ---------------------------Control End--------------------------------
-
-
-
-					// 如果需要记录传感器数据到CSV
-					if (recordSensorDataToCSV)
-					{
-						// 拼装CSV行
-						std::string timeStr = std::to_string((double)ViperTimestamp);
-						std::vector<std::string> row;
-						row.push_back(timeStr);
-
-						// Sensor1 pos
-						row.push_back(std::to_string(pno_1.pos[0]));
-						row.push_back(std::to_string(pno_1.pos[1]));
-						row.push_back(std::to_string(pno_1.pos[2]));
-
-						// Sensor1 ori
-						row.push_back(std::to_string(pno_1.ori[0]));
-						row.push_back(std::to_string(pno_1.ori[1]));
-						row.push_back(std::to_string(pno_1.ori[2]));
-						row.push_back(std::to_string(pno_1.ori[3]));
-
-						// Sensor2 pos
-						row.push_back(std::to_string(pno_2.pos[0]));
-						row.push_back(std::to_string(pno_2.pos[1]));
-						row.push_back(std::to_string(pno_2.pos[2]));
-
-						// Sensor2 ori
-						row.push_back(std::to_string(pno_2.ori[0]));
-						row.push_back(std::to_string(pno_2.ori[1]));
-						row.push_back(std::to_string(pno_2.ori[2]));
-						row.push_back(std::to_string(pno_2.ori[3]));
-
-						// Sensor2 in Sensor1 frame
-						row.push_back(std::to_string(pno2_in_sensor1_frame.pos[0]));
-						row.push_back(std::to_string(pno2_in_sensor1_frame.pos[1]));
-						row.push_back(std::to_string(pno2_in_sensor1_frame.pos[2]));
-
-						row.push_back(std::to_string(pno2_in_sensor1_frame.ori[0]));
-						row.push_back(std::to_string(pno2_in_sensor1_frame.ori[1]));
-						row.push_back(std::to_string(pno2_in_sensor1_frame.ori[2]));
-						row.push_back(std::to_string(pno2_in_sensor1_frame.ori[3]));
-
-						writeToCSV(row);
-					}
-				
-			}
-		
-			*/
-
-///////////////
-
-		//tool->setDeviceLocalPos(GrabFramePNO((MYPNOTYPE*)&(f.pF)[0], pSD, 1)/25.4);
-
-		//tool->updateFromDevice();
-
-
-
-		// compute interaction forces
-		//tool->computeInteractionForces();
-
-
-		// 在主触觉循环中，在现有碰撞检测代码后添加：
-
 		/////////////////////////////////////////////////////////////////////////
 		// 实验模式处理
 		/////////////////////////////////////////////////////////////////////////
@@ -2976,14 +2517,6 @@ else if (!experimentMode) {
 		presCurr = newPressure;
 	}
 
-	// 表征模式调试输出
-	// 表征模式单行调试输出
-	//std::cout << std::fixed << std::setprecision(2)
-	//	<< "[CHAR] Target:" << targetPos.str(1) << "mm "
-	//	<< "Current:" << newPos.str(1) << "mm "
-	//	<< "Error:" << error << "mm "
-	//	<< "Press:" << presCurr.str(1) << "kPa "
-	//	<< "Traj:" << TrajTarget.str(3) << "m    \r";
 }
 else {
 	// 实验模式但无活跃试次时隐藏立方体
@@ -3065,7 +2598,7 @@ else {
 	FINISH_HAPTIC_CYCLE:
 		;   // 空语句占位
 		// send forces to haptic device
-		//tool->applyToDevice();  
+		// tool->applyToDevice();  
 	}
 
 	// exit haptics thread
@@ -3178,23 +2711,6 @@ void openCSV(const std::string& filename)
 	}
 }
 
-/*
-
-void openCSV(const std::string& filename)
-{
-	csvFile.open(filename, std::ios::app);
-	if (!csvFile.is_open()) {
-		std::cerr << "Unable to open file" << std::endl;
-		return;
-	}
-	// 写表头（只要在第一次写时写一次即可）
-	csvFile << "ViperTimestamp,"
-		<< "S1_posX,S1_posY,S1_posZ,S1_oriW,S1_oriX,S1_oriY,S1_oriZ,"
-		<< "S2_posX,S2_posY,S2_posZ,S2_oriW,S2_oriX,S2_oriY,S2_oriZ,"
-		<< "Rel_posX,Rel_posY,Rel_posZ,Rel_oriW,Rel_oriX,Rel_oriY,Rel_oriZ\n";
-	csvFile.flush();
-}
-*/
 
 // Function to write data to the open CSV file
 void writeToCSV(const std::vector<string>& row) {
@@ -3219,379 +2735,6 @@ void closeCSV() {
 		csvFile.close();
 	}
 }
-
-void DisplayError(int32_t err, const char* szMsg)
-{
-	cout << szMsg << " : " << vpcmdif_errorStr(err);
-
-	cout << endl;
-}
-void DisplaySEUs()
-{
-	const char* szrpt = 0;
-	int r = 0;
-	if (r = vpctx_dev_report(g_ctx, szrpt))
-	{
-		DisplayError(r, "vpctx_report");
-	}
-
-	cout << endl << "SEUs Info:" << endl;
-	cout << "ID   : Serial Num       : Name              " << endl;
-	cout << "------------------------------------------------" << endl;
-	if (szrpt)
-	{
-		cout << szrpt;
-	}
-	else
-		cout << "None found." << endl;
-
-}
-bool Connect()
-{
-	bool bRet = false;
-	int  r = 0;
-	string str;
-
-	size_t ctxsize = sizeof(g_ctx);
-	vpcmdif_trace(g_bTraceMode ? g_TraceLevel : 0);
-	if (r = vpcmdif_init(g_ctx))
-	{
-		//error initializing vpcmdif lib
-		DisplayError(r, "vpcmdif_init");
-	}
-	else if (r = usbcnx_fxn_info[g_TrackerType].func(g_ctx, g_hnd, g_pid))
-	{
-		DisplayError(r, usbcnx_fxn_info[g_TrackerType].szfunc);
-	}
-	else
-	{
-		bRet = true;
-		DisplayError(r, "vpctx_connectusb");
-		cout << r << "vpctx_connectusb";
-		DisplaySEUs();
-	}
-
-	return bRet;
-}
-
-void Disconnect()
-{
-	int r = vpcmdif_release(g_ctx);
-	DisplayError(r, "vpcmdif_release");
-};
-
-bool StartCont()
-{
-	int r = 0;
-	if (r = vpcmd_dev_contpno(g_ctx, g_hnd, CMD_ACTION_SET))
-		DisplayError(r, "vpcmd_dev_contpno SET");
-
-	return r == 0;
-}
-bool StopCont()
-{
-	int r = 0;
-	if (r = vpcmd_dev_contpno(g_ctx, g_hnd, CMD_ACTION_RESET))
-		DisplayError(r, "vpcmd_dev_contpno RESET");
-
-	return r == 0;
-}
-
-
-
-//------------------------------------------------------------------------------
-// A function to set boresight on sensor #0 (which you call "sensor1").
-// This makes the Polhemus hardware treat the current physical pose as "no rotation".
-//------------------------------------------------------------------------------
-bool boresightSensor1()
-{
-	// 说明：sensor1 对应 ID=0
-	int sensorID = 0;
-
-	//--- 0) 确保已进入连续采集 (StartCont 或 vpcmd_dev_contpno(...,SET))，否则 FIFO 无数据 ---
-
-	//--- 1) 多次尝试读取 FIFO 帧 ---
-	vpFrameInfo tmpFrame;
-	const int maxTries = 50;    // 最多重试 50 次
-	const int sleepMs = 10;    // 每次失败后等待10毫秒
-	bool gotFrame = false;
-
-	for (int i = 0; i < maxTries; i++)
-	{
-		int ret = vpctx_dev_fifopnof(g_ctx, g_hnd, tmpFrame);
-		if (ret == 0)
-		{
-			// 成功读到帧
-			if (tmpFrame.uiSize > 0 && tmpFrame.pF != nullptr)
-			{
-				gotFrame = true;
-				break; // 跳出循环
-			}
-		}
-		else if (ret != E_CTXERR_NO_MORE_DATA)
-		{
-			// 如果不是 E_CTXERR_NO_MORE_DATA 就是其它错误(无效句柄等)
-			DisplayError(ret, "vpctx_dev_fifopnof in boresightSensor1()");
-			return false;
-		}
-		// 若只是 E_CTXERR_NO_MORE_DATA 或空帧 => 等等再试
-		cSleepMs(sleepMs);
-	}
-
-	if (!gotFrame)
-	{
-		std::cout << "[ERROR] boresightSensor1(): no valid FIFO frame after retry.\n";
-		return false;
-	}
-
-	//--- 2) 解析这一帧 ---
-	if (tmpFrame.uiSize == 0 || tmpFrame.pF == nullptr)
-	{
-		std::cout << "[ERROR] boresightSensor1(): empty frame.\n";
-		return false;
-	}
-
-	MYPNOTYPE* pF = (MYPNOTYPE*)&(tmpFrame.pF)[0];
-	if (!pF)
-	{
-		std::cout << "[ERROR] Null pointer in boresightSensor1().\n";
-		return false;
-	}
-
-	// 解析 sensor1 (ID=0) 的 PNODATA
-	PNODATA pnoCur = GrabFramePNO(pF, sensorID);
-
-	//--- 3) 位置单位转换，如 cm->m ---
-	//  假设 Polhemus 输出是 cm，则乘0.01 得到米
-	double scale = 0.01;
-	cVector3d pnoCurPos(
-		pnoCur.pos[0] * scale,
-		pnoCur.pos[1] * scale,
-		pnoCur.pos[2] * scale
-	);
-
-	//--- 4) 记录软件 offset => 后续 pos - g_posOffset = 0 ---
-	g_posOffset = pnoCurPos;
-
-	//--- 5) 硬件 boresight => 让当前姿态视为无旋转 ---
-	CBoresightCfg newBore;
-	memset(&newBore, 0, sizeof(newBore));
-	newBore.Units() = (eViperOriUnits)config.ori_units;
-
-	if (config.ori_units == ORI_QUATERNION)
-	{
-		// quaternion => [w=1, x=y=z=0]
-		newBore.params[0] = 1.0f;
-		newBore.params[1] = 0.0f;
-		newBore.params[2] = 0.0f;
-		newBore.params[3] = 0.0f;
-	}
-	else
-	{
-		// euler => [Az=0, El=0, Roll=0]
-		newBore.params[0] = 0.0f;
-		newBore.params[1] = 0.0f;
-		newBore.params[2] = 0.0f;
-		newBore.params[3] = 0.0f;
-	}
-
-	int r2 = vpcmd_sns_boresight(g_ctx, g_hnd, sensorID, CMD_ACTION_SET, newBore);
-	if (r2 != 0)
-	{
-		DisplayError(r2, "vpcmd_sns_boresight SET boresight");
-		return false;
-	}
-
-	//--- 提示 ---
-	std::cout << "[INFO] boresightSensor1() done. orientation=zero.\n"
-		<< "       software offset => " << g_posOffset.str() << std::endl;
-
-	return true;
-}
-
-bool boresightSensor2()
-{
-	int sensorID = 1; // sensor2
-
-	vpFrameInfo tmpFrame;
-	const int maxTries = 50;
-	const int sleepMs = 10;
-	bool gotFrame = false;
-
-	// 多次尝试读取 FIFO
-	for (int i = 0; i < maxTries; i++)
-	{
-		int ret = vpctx_dev_fifopnof(g_ctx, g_hnd, tmpFrame);
-		if (ret == 0)
-		{
-			if (tmpFrame.uiSize > 0 && tmpFrame.pF != nullptr)
-			{
-				gotFrame = true;
-				break;
-			}
-		}
-		else if (ret != E_CTXERR_NO_MORE_DATA)
-		{
-			DisplayError(ret, "vpctx_dev_fifopnof in boresightSensor2_2()");
-			return false;
-		}
-		cSleepMs(sleepMs);
-	}
-
-	if (!gotFrame)
-	{
-		std::cout << "[ERROR] boresightSensor2_2(): no valid FIFO frame after retry.\n";
-		return false;
-	}
-
-	if (tmpFrame.uiSize == 0 || tmpFrame.pF == nullptr)
-	{
-		std::cout << "[ERROR] boresightSensor2_2(): empty frame.\n";
-		return false;
-	}
-	MYPNOTYPE* pF = (MYPNOTYPE*)&(tmpFrame.pF)[0];
-	if (!pF)
-	{
-		std::cout << "[ERROR] Null pointer in boresightSensor2_2().\n";
-		return false;
-	}
-
-	// 抓取 sensor2
-	PNODATA pnoCur = GrabFramePNO(pF, sensorID);
-
-	// 若Polhemus输出单位是cm => *0.01 => m
-	double scale = 0.01;
-	cVector3d pnoCurPos(
-		pnoCur.pos[0] * scale,
-		pnoCur.pos[1] * scale,
-		pnoCur.pos[2] * scale
-	);
-
-	// 如需给 sensor2 做位置 offset，可定义 g_posOffset2
-	// g_posOffset2 = pnoCurPos; // (可选)
-
-	// 设置硬件 boresight => [无旋转]
-	CBoresightCfg newBore;
-	memset(&newBore, 0, sizeof(newBore));
-	newBore.Units() = (eViperOriUnits)config.ori_units;
-
-	if (config.ori_units == ORI_QUATERNION)
-	{
-		newBore.params[0] = 1.0f;
-		newBore.params[1] = 0.0f;
-		newBore.params[2] = 0.0f;
-		newBore.params[3] = 0.0f;
-	}
-	else
-	{
-		newBore.params[0] = 0.0f;
-		newBore.params[1] = 0.0f;
-		newBore.params[2] = 0.0f;
-		newBore.params[3] = 0.0f;
-	}
-
-	int r2 = vpcmd_sns_boresight(g_ctx, g_hnd, sensorID, CMD_ACTION_SET, newBore);
-	if (r2 != 0)
-	{
-		DisplayError(r2, "vpcmd_sns_boresight SET boresight sensor2");
-		return false;
-	}
-
-	std::cout << "[INFO] boresightSensor2_2() done. orientation=zero.\n"
-		//<< "pos offset => " << g_posOffset2.str() << std::endl;
-		;
-	return true;
-}
-
-
-
-
-bool clearBoresightSensor1()
-{
-	// The same ID used in boresightSensor1()
-	int sensorID = 0;
-	CBoresightCfg emptyBore;
-	memset(&emptyBore, 0, sizeof(emptyBore));
-
-	// 1) First clear the hardware boresight (reset orientation compensation)
-	int r = vpcmd_sns_boresight(g_ctx, g_hnd, sensorID, CMD_ACTION_RESET, emptyBore);
-	if (r != 0)
-	{
-		DisplayError(r, "vpcmd_sns_boresight RESET");
-		return false;
-	}
-
-	// 2) Also reset the software displacement offset g_posOffset to (0,0,0)
-	//    This way, any subsequent calculation like (pno.pos - g_posOffset) 
-	//    becomes (pno.pos - 0), i.e., the original coordinates.
-	g_posOffset.set(0.0, 0.0, 0.0);
-
-	cout << "[INFO] clearBoresightSensor1: sensor #" << sensorID
-		<< " boresight removed, and g_posOffset reset to zero." << endl;
-
-	return true;
-}
-
-
-
-
-
-
-// Run program: Ctrl + F5 or Debug > Start Without Debugging menu
-// Debug program: F5 or Debug > Start Debugging menu
-// Minimal function to display PNO frames
-PNODATA GrabFramePNO(MYPNOTYPE* pv, uint32_t s_index)
-{
-	// We’ll ignore the optional 'pts' parameter for simplicity
-	if (!pv)
-	{
-		/*std::cout << "Error: PNO pointer or SENFRAMEDATA pointer is null.\n";*/
-		return { 1,1,1,1,1,1,1 };
-	}
-
-	// Retrieve SEU ID, frame number, and number of sensors from the header
-	uint32_t seuID = pv->seupno.seuid;
-	uint32_t frameNum = pv->seupno.frame;
-	uint32_t sensorCount = pv->seupno.sensorCount;
-
-	PNODATA currentPNO{};
-	// We'll just return how many bytes we "consumed" from the sensor array
-	int32_t totalBytes = 0;
-	cVector3d prevPos(0, 0, 0); // Replace with the appropriate position type
-	SENFRAMEDATA* pSD = &(pv->sarr[s_index]);
-
-	// Print basic PNO: position [x, y, z], orientation [ori0, ori1, ori2, ori3]
-	// If orientation is in quaternion form, ori[3] is the 'w' or final component;
-	// if Euler angles, typically only ori[0..2] matter. 
-	// For minimal example, just print what’s stored:
-
-	// Get the current position
-
-	currentPNO.pos[0] = pSD->pno.pos[0];
-	currentPNO.pos[1] = pSD->pno.pos[1];
-	currentPNO.pos[2] = pSD->pno.pos[2];
-	currentPNO.ori[0] = pSD->pno.ori[0];
-	currentPNO.ori[1] = pSD->pno.ori[1];
-	currentPNO.ori[2] = pSD->pno.ori[2];
-	currentPNO.ori[3] = pSD->pno.ori[3];
-	//pno = cVector3d(pSD->pno.pos[0], pSD->pno.pos[1], pSD->pno.pos[2]);
-	//cout << pno << endl;
-	return currentPNO;
-}
-
-
-//double getCurrentTime()
-//{
-//	// 用 static 变量保存程序启动时的时间点，
-//	// 这样每次调用 getCurrentTime() 都会以同一基准计算相对时间
-//	static const auto startTime = std::chrono::system_clock::now();
-//	auto now = std::chrono::system_clock::now();
-//	// 计算从 startTime 到现在的时间间隔
-//	auto duration = now - startTime;
-//	// 将间隔转换为以微秒为单位的 double 数值，再除以 1e6 得到秒数
-//	double seconds = std::chrono::duration_cast<std::chrono::duration<double, std::micro>>(duration).count() / 1e6;
-//	return seconds;
-//}
 
 
 
@@ -3914,36 +3057,3 @@ void updateSurfaceOrientation(FeedbackDirection direction)
 	leftCube->createAABBCollisionDetector(0.002);
 	rightCube->createAABBCollisionDetector(0.002);
 }
-
-//void openExperimentCSV(const std::string& filename)
-//{
-//	experimentCsvFile.open(filename, std::ios::out); // 使用out而不是app，每次创建新文件
-//	if (!experimentCsvFile.is_open()) {
-//		std::cerr << "Unable to open experiment file\n";
-//		return;
-//	}
-//	// 写入实验数据表头
-//	experimentCsvFile << "UserChoice,ReferenceStiffness,ComparisonStiffness,ReactionTime\n";
-//	experimentCsvFile.flush();
-//	std::cout << "Experiment CSV file created: " << filename << std::endl;
-//}
-//
-//void writeExperimentDataToCSV(int userChoice, double refStiffness, double compStiffness, double reactionTime)
-//{
-//	if (experimentCsvFile.is_open()) {
-//		experimentCsvFile << userChoice << ","
-//			<< refStiffness << ","
-//			<< compStiffness << ","
-//			<< reactionTime << "\n";
-//		experimentCsvFile.flush();
-//	}
-//	else {
-//		std::cerr << "Experiment file not open for writing" << std::endl;
-//	}
-//}
-//
-//void closeExperimentCSV() {
-//	if (experimentCsvFile.is_open()) {
-//		experimentCsvFile.close();
-//	}
-//}
