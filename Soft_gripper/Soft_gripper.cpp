@@ -160,14 +160,11 @@ inline void mtPose2Chai(const double pos_mm[3],
 }
 static bool g_mtAvailable = false;           // ★ 新增
 
+
+
 //------------------------------------------------------------------------------
 // Calibration相关变量
 //------------------------------------------------------------------------------
-// 标定矩阵
-cMatrix3d g_rot_top_actuator;    // top在actuator坐标系下的旋转
-cVector3d g_pos_top_actuator;    // top在actuator坐标系下的位置
-cMatrix3d g_rot_bot_finger;      // bot在finger坐标系下的旋转
-cVector3d g_pos_bot_finger;      // bot在finger坐标系下的位置
 
 // 显示球体
 cShapeSphere* sphereFinger = nullptr;    // 绿色 - finger marker
@@ -179,76 +176,35 @@ cShapeSphere* sphereTop = nullptr;       // 黄色 - 计算得到的top
 bool g_showCalibrationSpheres = false;
 
 //------------------------------------------------------------------------------
-// 读取4x4变换矩阵文件
+// Calibration相关变量
 //------------------------------------------------------------------------------
-bool loadTransformMatrix(const std::string& filename, cMatrix3d& rotation, cVector3d& position)
-{
-	std::ifstream file(filename);
-	if (!file.is_open()) {
-		std::cerr << "Cannot open calibration file: " << filename << std::endl;
-		return false;
-	}
+// Calibration模式控制
+bool g_calibrationMode = false;
+enum CalibrationStep {
+	CALIB_NONE,
+	CALIB_WAITING_FINGER,
+	CALIB_WAITING_BOT,
+	CALIB_WAITING_ACTUATOR,
+	CALIB_WAITING_TOP,
+	CALIB_COMPLETE
+};
+CalibrationStep g_calibStep = CALIB_NONE;
 
-	double mat[4][4];
-	for (int i = 0; i < 4; i++) {
-		for (int j = 0; j < 4; j++) {
-			file >> mat[i][j];
-		}
-	}
-	file.close();
+// 保存calibration时记录的位置和旋转
+cVector3d g_calibFingerPos, g_calibBotPos, g_calibActuatorPos, g_calibTopPos;
+cMatrix3d g_calibFingerRot, g_calibBotRot, g_calibActuatorRot, g_calibTopRot;
 
-	// 提取旋转矩阵（3x3）
-	rotation.set(mat[0][0], mat[0][1], mat[0][2],
-		mat[1][0], mat[1][1], mat[1][2],
-		mat[2][0], mat[2][1], mat[2][2]);
+// 计算得到的变换矩阵
+cMatrix3d g_T_finger_to_bot_rot;
+cVector3d g_T_finger_to_bot_pos;
+cMatrix3d g_T_actuator_to_top_rot;
+cVector3d g_T_actuator_to_top_pos;
+bool g_calibrationValid = false;
 
-	// 提取位置向量（单位：mm）
-	position.set(mat[0][3], mat[1][3], mat[2][3]);
+// 显示calibration提示的标签
+cLabel* labelCalibrationStatus = nullptr;
 
-	std::cout << "Loaded calibration from " << filename << std::endl;
-	std::cout << "Position: " << position.str(2) << " mm" << std::endl;
 
-	return true;
-}
-//------------------------------------------------------------------------------
-// MT相机坐标系到CHAI3D坐标系的变换
-//------------------------------------------------------------------------------
-void convertMTtoCHAI3D(cMatrix3d& rotation, cVector3d& position)
-{
-	// 1. 变换位置向量 - 只对Z取负
-	double origX = position.x();
-	double origY = position.y();
-	double origZ = position.z();
-
-	position.set(origX,    // X保持不变
-		origY,    // Y保持不变
-		-origZ);   // Z取负
-
-	// 2. 变换旋转矩阵
-	// 对于只有Z轴反向的情况，变换规则是：
-	// 涉及Z轴的元素需要取负
-	double r[3][3];
-	for (int i = 0; i < 3; i++) {
-		for (int j = 0; j < 3; j++) {
-			r[i][j] = rotation(i, j);
-		}
-	}
-
-	// 当只有Z轴反向时，旋转矩阵的变换规则：
-	// - 第3列（Z轴方向）的前两个元素取负
-	// - 第3行（Z轴分量）的前两个元素取负
-	// - 其他元素保持不变
-	rotation.set(
-		r[0][0], r[0][1], -r[0][2],  // 第一行：Z分量取负
-		r[1][0], r[1][1], -r[1][2],  // 第二行：Z分量取负
-		-r[2][0], -r[2][1], r[2][2]   // 第三行：X,Y分量取负
-	);
-
-	// 打印用于调试
-	std::cout << "[Calibration] MT->CHAI3D transform (Z-only) applied" << std::endl;
-	std::cout << "  Position: (" << origX << "," << origY << "," << origZ
-		<< ") -> (" << position.x() << "," << position.y() << "," << position.z() << ")" << std::endl;
-}
 
 //--------------------------------------------------------------
 //  保存调零时抓到的基准
@@ -464,7 +420,77 @@ double getCurrentTime();
 	Zonghe Chua
 */
 //==============================================================================
+// 辅助函数：从MT读取当前marker位置并转换到CHAI3D坐标系
+bool getMTMarkerPosition(const std::string& markerName, cVector3d& outPos, cMatrix3d& outRot)
+{
+	std::cout << "[DEBUG] Trying to read marker: " << markerName << std::endl;
 
+	if (!g_mtAvailable) {
+		std::cerr << "[Calibration] MT not available" << std::endl;
+		return false;
+	}
+
+	if (!MT.update()) {
+		std::cerr << "[Calibration] MT update failed" << std::endl;
+		return false;
+	}
+
+	mtw::Pose pose;
+	try {
+		if (!MT.getPoseAndRotMat(markerName, pose)) {
+			std::cerr << "[Calibration] Cannot find marker: " << markerName << std::endl;
+			std::cerr << "[Calibration] Make sure the marker name is exactly correct (case-sensitive)" << std::endl;
+			return false;
+		}
+	}
+	catch (const std::exception& e) {
+		std::cerr << "[Calibration] Exception while reading marker: " << e.what() << std::endl;
+		return false;
+	}
+
+	std::cout << "[DEBUG] Successfully read marker " << markerName
+		<< " at position: " << pose.pos[0] << ", " << pose.pos[1] << ", " << pose.pos[2] << std::endl;
+
+	if (!g_mtAvailable || !MT.update()) {
+		std::cerr << "[Calibration] MT not available or update failed" << std::endl;
+		return false;
+	}
+
+	// 应用调零变换（如果有）
+	double zeroPos[3];
+	double zeroRot[9];
+
+	if (g_mtZero.valid) {
+		for (int r = 0; r < 3; ++r) {
+			zeroPos[r] =
+				g_mtZero.frR[0 * 3 + r] * (pose.pos[0] - g_mtZero.frPos[0]) +
+				g_mtZero.frR[1 * 3 + r] * (pose.pos[1] - g_mtZero.frPos[1]) +
+				g_mtZero.frR[2 * 3 + r] * (pose.pos[2] - g_mtZero.frPos[2]);
+		}
+
+		for (int r = 0; r < 3; ++r)
+			for (int c = 0; c < 3; ++c)
+				zeroRot[c * 3 + r] =
+				g_mtZero.frR[0 * 3 + r] * pose.rot[0 * 3 + c] +
+				g_mtZero.frR[1 * 3 + r] * pose.rot[1 * 3 + c] +
+				g_mtZero.frR[2 * 3 + r] * pose.rot[2 * 3 + c];
+	}
+	else {
+		for (int i = 0; i < 3; ++i) zeroPos[i] = pose.pos[i];
+		for (int i = 0; i < 9; ++i) zeroRot[i] = pose.rot[i];
+	}
+
+	// 应用坐标变换：交换X,Y轴，Z轴反向
+	outPos.set(zeroPos[1] * 0.001,     // X <- Y
+		zeroPos[0] * 0.001,     // Y <- X  
+		-zeroPos[2] * 0.001);   // Z <- -Z
+
+	outRot.set(zeroRot[0], zeroRot[1], zeroRot[2],
+		zeroRot[3], zeroRot[4], zeroRot[5],
+		zeroRot[6], zeroRot[7], zeroRot[8]);
+
+	return true;
+}
 int main(int argc, char* argv[])
 {
 	//--------------------------------------------------------------------------
@@ -883,26 +909,7 @@ int main(int argc, char* argv[])
 	sphereTop->setEnabled(false);
 	world->addChild(sphereTop);
 
-	// 加载calibration文件
-	if (!loadTransformMatrix("actuator_T_top.txt", g_rot_top_actuator, g_pos_top_actuator)) {
-		std::cerr << "Failed to load actuator_T_top calibration!" << std::endl;
-	}
-	else {
-		std::cout << "[Calibration] Loaded actuator_T_top from MT coordinates" << std::endl;
-		// ★ 转换到CHAI3D坐标系
-		convertMTtoCHAI3D(g_rot_top_actuator, g_pos_top_actuator);
-		std::cout << "[Calibration] Converted actuator_T_top to CHAI3D coordinates" << std::endl;
-	}
 
-	if (!loadTransformMatrix("finger_T_bot.txt", g_rot_bot_finger, g_pos_bot_finger)) {
-		std::cerr << "Failed to load finger_T_bot calibration!" << std::endl;
-	}
-	else {
-		std::cout << "[Calibration] Loaded finger_T_bot from MT coordinates" << std::endl;
-		// ★ 转换到CHAI3D坐标系
-		convertMTtoCHAI3D(g_rot_bot_finger, g_pos_bot_finger);
-		std::cout << "[Calibration] Converted finger_T_bot to CHAI3D coordinates" << std::endl;
-	}
 /////////////////////////////////////////////////////////////////////////
 // 实验用立方体 (左右两个)
 /////////////////////////////////////////////////////////////////////////
@@ -974,6 +981,12 @@ int main(int argc, char* argv[])
 	camera->m_frontLayer->addChild(labelTrialInfo);
 	labelTrialInfo->setEnabled(false); // 默认隐藏
 
+	// 创建calibration状态标签
+	labelCalibrationStatus = new cLabel(font);
+	labelCalibrationStatus->m_fontColor.setRed();
+	labelCalibrationStatus->setLocalPos(20, height - 100);
+	camera->m_frontLayer->addChild(labelCalibrationStatus);
+	labelCalibrationStatus->setEnabled(false);
 
 	// create a background
 	background = new cBackground();
@@ -1292,6 +1305,8 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 		if (experimentMode) {
 			// 进入实验模式
 			if (!userStudy) {
+				hasInitPress = false;
+				presCurr = ResolvedRateControl.m_initPressure;  // 立即初始化
 				// 提示输入用户ID
 				std::cout << "\n=== ENTER USER ID ===\n";
 				std::cout << "Please enter user ID: ";
@@ -1494,6 +1509,174 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 		if (sphereBot) sphereBot->setEnabled(g_showCalibrationSpheres);
 		if (sphereTop) sphereTop->setEnabled(g_showCalibrationSpheres);
 		}
+	else if (a_key == GLFW_KEY_Z)  // Z for Calibration mode
+	{
+		if (!g_calibrationMode) {
+			// 进入calibration模式
+			g_calibrationMode = true;
+			g_calibStep = CALIB_WAITING_FINGER;
+			g_calibrationValid = false;
+
+			std::cout << "\n=== ENTERING CALIBRATION MODE ===" << std::endl;
+			std::cout << "Please position markers and press SPACE to record:" << std::endl;
+			std::cout << "1. Position FINGER marker and press SPACE" << std::endl;
+
+			// 显示所有球体以便观察
+			if (sphereFinger) sphereFinger->setEnabled(true);
+			if (sphereActuator) sphereActuator->setEnabled(true);
+			if (sphereBot) sphereBot->setEnabled(true);
+			if (sphereTop) sphereTop->setEnabled(true);
+
+			labelCalibrationStatus->setEnabled(true);
+			labelCalibrationStatus->setText("Calibration: Position FINGER marker and press SPACE");
+		}
+		else {
+			// 退出calibration模式
+			g_calibrationMode = false;
+			g_calibStep = CALIB_NONE;
+			labelCalibrationStatus->setEnabled(false);
+
+			std::cout << "\n=== EXITING CALIBRATION MODE ===" << std::endl;
+			if (g_calibrationValid) {
+				std::cout << "Calibration saved and will be used for tracking" << std::endl;
+			}
+			else {
+				std::cout << "Calibration incomplete - tracking disabled" << std::endl;
+			}
+		}
+		}
+	else if (a_key == GLFW_KEY_SPACE && g_calibrationMode)  // SPACE to record position
+	{
+		// 在calibration模式下记录当前位置
+		if (g_calibStep == CALIB_WAITING_FINGER) {
+			// 从MT读取finger marker的当前位置
+			if (getMTMarkerPosition("finger", g_calibFingerPos, g_calibFingerRot)) {
+				g_calibStep = CALIB_WAITING_BOT;
+				std::cout << "Finger position recorded: " << (g_calibFingerPos * 1000).str(3) << " mm" << std::endl;
+				std::cout << "2. Place BOT marker at calibration position and press SPACE" << std::endl;
+				labelCalibrationStatus->setText("Calibration: Place BOT marker and press SPACE");
+
+				// 更新球体显示
+				if (sphereFinger) {
+					sphereFinger->setLocalPos(g_calibFingerPos);
+					sphereFinger->setLocalRot(g_calibFingerRot);
+				}
+			}
+			else {
+				std::cout << "[ERROR] Cannot read finger marker position from MT!" << std::endl;
+			}
+		}
+		else if (g_calibStep == CALIB_WAITING_BOT) {
+			// 从MT读取bot marker的当前位置
+			if (getMTMarkerPosition("bot", g_calibBotPos, g_calibBotRot)) {
+				g_calibStep = CALIB_WAITING_ACTUATOR;
+				std::cout << "Bot position recorded: " << (g_calibBotPos * 1000).str(3) << " mm" << std::endl;
+				std::cout << "3. Position ACTUATOR marker and press SPACE" << std::endl;
+				labelCalibrationStatus->setText("Calibration: Position ACTUATOR marker and press SPACE");
+
+				// 更新球体显示
+				if (sphereBot) {
+					sphereBot->setLocalPos(g_calibBotPos);
+					sphereBot->setLocalRot(g_calibBotRot);
+					sphereBot->setEnabled(true);
+				}
+			}
+			else {
+				std::cout << "[ERROR] Cannot read bot marker position from MT!" << std::endl;
+				std::cout << "Make sure 'bot' marker is visible and recognized" << std::endl;
+			}
+		}
+		else if (g_calibStep == CALIB_WAITING_ACTUATOR) {
+			// 从MT读取actuator marker的当前位置
+			if (getMTMarkerPosition("actuator", g_calibActuatorPos, g_calibActuatorRot)) {
+				g_calibStep = CALIB_WAITING_TOP;
+				std::cout << "Actuator position recorded: " << (g_calibActuatorPos * 1000).str(3) << " mm" << std::endl;
+				std::cout << "4. Place TOP marker at calibration position and press SPACE" << std::endl;
+				labelCalibrationStatus->setText("Calibration: Place TOP marker and press SPACE");
+
+				// 更新球体显示
+				if (sphereActuator) {
+					sphereActuator->setLocalPos(g_calibActuatorPos);
+					sphereActuator->setLocalRot(g_calibActuatorRot);
+				}
+			}
+			else {
+				std::cout << "[ERROR] Cannot read actuator marker position from MT!" << std::endl;
+			}
+		}
+		else if (g_calibStep == CALIB_WAITING_TOP) {
+			std::cout << "[DEBUG] Attempting to read top marker..." << std::endl;
+
+			// 先检查sphereTop是否存在
+			if (!sphereTop) {
+				std::cerr << "[ERROR] sphereTop is null!" << std::endl;
+				return;
+			}
+
+			// 尝试读取top marker
+			cVector3d tempTopPos;
+			cMatrix3d tempTopRot;
+
+			// 注意：这里的marker名称可能需要修改！
+			// 请根据您的实际marker名称修改下面这行
+			if (getMTMarkerPosition("top", tempTopPos, tempTopRot)) {  // 或者试试 "Top" 或 "TOP"
+				g_calibTopPos = tempTopPos;
+				g_calibTopRot = tempTopRot;
+
+				std::cout << "Top position recorded: " << (g_calibTopPos * 1000).str(3) << " mm" << std::endl;
+
+				// 更新球体显示
+				sphereTop->setLocalPos(g_calibTopPos);
+				sphereTop->setLocalRot(g_calibTopRot);
+				sphereTop->setEnabled(true);
+
+				// 检查所有必需的数据是否有效
+				std::cout << "[DEBUG] Checking calibration data validity..." << std::endl;
+				std::cout << "[DEBUG] Finger pos: " << g_calibFingerPos.str(3) << std::endl;
+				std::cout << "[DEBUG] Actuator pos: " << g_calibActuatorPos.str(3) << std::endl;
+
+				// 计算变换矩阵
+				try {
+					// T_finger_to_bot
+					cMatrix3d fingerRotInv = g_calibFingerRot;
+					fingerRotInv.trans();
+					g_T_finger_to_bot_pos = fingerRotInv * (g_calibBotPos - g_calibFingerPos);
+					g_T_finger_to_bot_rot = fingerRotInv * g_calibBotRot;
+
+					// T_actuator_to_top
+					cMatrix3d actuatorRotInv = g_calibActuatorRot;
+					actuatorRotInv.trans();
+					g_T_actuator_to_top_pos = actuatorRotInv * (g_calibTopPos - g_calibActuatorPos);
+					g_T_actuator_to_top_rot = actuatorRotInv * g_calibTopRot;
+
+					g_calibrationValid = true;
+					g_calibStep = CALIB_COMPLETE;
+
+					std::cout << "\n=== CALIBRATION COMPLETE ===" << std::endl;
+					std::cout << "Bot relative to Finger: " << (g_T_finger_to_bot_pos * 1000).str(3) << " mm" << std::endl;
+					std::cout << "Top relative to Actuator: " << (g_T_actuator_to_top_pos * 1000).str(3) << " mm" << std::endl;
+					std::cout << "\nNOTE: You can now remove/obstruct the bot and top markers." << std::endl;
+					std::cout << "Their positions will be tracked through rigid body transformation." << std::endl;
+					std::cout << "Press 'C' to exit calibration mode" << std::endl;
+
+					labelCalibrationStatus->setText("Calibration COMPLETE! Press 'C' to exit");
+
+				}
+				catch (const std::exception& e) {
+					std::cerr << "[ERROR] Exception during transformation calculation: " << e.what() << std::endl;
+					g_calibrationValid = false;
+				}
+			}
+			else {
+				std::cout << "[ERROR] Cannot read top marker position from MT!" << std::endl;
+				std::cout << "Possible reasons:" << std::endl;
+				std::cout << "1. The marker name might be wrong (try 'Top' or 'TOP' instead of 'top')" << std::endl;
+				std::cout << "2. The marker is not visible to the camera" << std::endl;
+				std::cout << "3. The marker template is not loaded" << std::endl;
+			}
+		}
+		}
+
 
 
 }
@@ -1552,6 +1735,10 @@ void close(void)
 	if (sphereTop) { delete sphereTop; sphereTop = nullptr; }
 	closeCSV();
 	//closeExperimentCSV();
+	if (labelCalibrationStatus) {
+		delete labelCalibrationStatus;
+		labelCalibrationStatus = nullptr;
+	}
 }
 
 //------------------------------------------------------------------------------
@@ -2298,84 +2485,86 @@ if (g_showCalibrationSpheres && snap.haveFr && snap.haveAct) {
 		sphereActuator->setLocalRot(actuatorRot);
 	}
 
-	// 计算bot在世界坐标系下的位置（蓝色球）
-	// bot_world = finger_world * bot_finger
-	cVector3d botPosLocal = g_pos_bot_finger * 0.001; // mm转m
-	cVector3d botPosWorld = fingerPos + fingerRot * botPosLocal;
-	cMatrix3d botRotWorld = fingerRot * g_rot_bot_finger;
+	// ★ 修改：使用运行时calibration数据计算bot和top位置
+	if (g_calibrationValid) {
+		// 计算bot在世界坐标系下的位置（蓝色球）
+		// bot_world = finger_world + finger_rot * T_finger_to_bot_pos
+		cVector3d botPosWorld = fingerPos + fingerRot * g_T_finger_to_bot_pos;
+		cMatrix3d botRotWorld = fingerRot * g_T_finger_to_bot_rot;
 
-	if (sphereBot) {
-		sphereBot->setLocalPos(botPosWorld);
-		sphereBot->setLocalRot(botRotWorld);
+		if (sphereBot) {
+			sphereBot->setLocalPos(botPosWorld);
+			sphereBot->setLocalRot(botRotWorld);
+			sphereBot->setEnabled(true);
+		}
+
+		// 计算top在世界坐标系下的位置（黄色球）
+		// top_world = actuator_world + actuator_rot * T_actuator_to_top_pos
+		cVector3d topPosWorld = actuatorPos + actuatorRot * g_T_actuator_to_top_pos;
+		cMatrix3d topRotWorld = actuatorRot * g_T_actuator_to_top_rot;
+
+		if (sphereTop) {
+			sphereTop->setLocalPos(topPosWorld);
+			sphereTop->setLocalRot(topRotWorld);
+			sphereTop->setEnabled(true);
+		}
+
+		// 计算并显示top在bot坐标系下的相对位置（用于验证）
+		cMatrix3d botRotWorldInv = botRotWorld;
+		botRotWorldInv.trans(); // 转置得到逆矩阵（对于旋转矩阵）
+
+		cVector3d topRelPos = botRotWorldInv * (topPosWorld - botPosWorld);
+		cMatrix3d topRelRot = botRotWorldInv * topRotWorld;
+
+		// ★ 新增：计算红球（actuator）和绿球（finger）之间的相对距离
+		cVector3d relativeVector = actuatorPos - fingerPos;  // 世界坐标系下的相对向量
+		double relativeDistance = relativeVector.length();   // 相对距离（米）
+
+		// ★ 新增：保存上一次的距离用于检测变化
+		static double lastRelativeDistance = -1.0;
+		static bool firstMeasurement = true;
+		double distanceChange = 0.0;
+
+		if (!firstMeasurement) {
+			distanceChange = relativeDistance - lastRelativeDistance;
+		}
+		lastRelativeDistance = relativeDistance;
+		firstMeasurement = false;
+
+		static int printCounter = 0;
+		if (++printCounter % 60 == 0) { // 每60帧打印一次
+			// ★ 打印红绿球相对距离信息
+			std::cout << "[RED-GREEN Distance] Current: " << std::fixed << std::setprecision(4)
+				<< relativeDistance * 1000 << " mm";
+			std::cout << " | [Top in Bot frame] Position: ("
+				<< std::fixed << std::setprecision(2)
+				<< topRelPos.x() * 1000 << ", "
+				<< topRelPos.y() * 1000 << ", "
+				<< topRelPos.z() * 1000 << ") mm" << std::endl;
+		}
 	}
+	else {
+		// 没有calibration时隐藏bot和top球体
+		if (sphereBot) {
+			sphereBot->setEnabled(false);
+		}
+		if (sphereTop) {
+			sphereTop->setEnabled(false);
+		}
 
-	// 计算top在世界坐标系下的位置（黄色球）
-	// top_world = actuator_world * top_actuator
-	cVector3d topPosLocal = g_pos_top_actuator * 0.001; // mm转m
-	cVector3d topPosWorld = actuatorPos + actuatorRot * topPosLocal;
-	cMatrix3d topRotWorld = actuatorRot * g_rot_top_actuator;
+		// 仍然计算和显示finger-actuator距离
+		cVector3d relativeVector = actuatorPos - fingerPos;
+		double relativeDistance = relativeVector.length();
 
-	if (sphereTop) {
-		sphereTop->setLocalPos(topPosWorld);
-		sphereTop->setLocalRot(topRotWorld);
-	}
-
-	// 计算并显示top在bot坐标系下的相对位置（用于验证）
-	cMatrix3d botRotWorldInv = botRotWorld;
-	botRotWorldInv.trans(); // 转置得到逆矩阵（对于旋转矩阵）
-
-	cVector3d topRelPos = botRotWorldInv * (topPosWorld - botPosWorld);
-	cMatrix3d topRelRot = botRotWorldInv * topRotWorld;
-
-	// ★ 新增：计算红球（actuator）和绿球（finger）之间的相对距离
-	cVector3d relativeVector = actuatorPos - fingerPos;  // 世界坐标系下的相对向量
-	double relativeDistance = relativeVector.length();   // 相对距离（米）
-
-	// ★ 新增：保存上一次的距离用于检测变化
-	static double lastRelativeDistance = -1.0;
-	static bool firstMeasurement = true;
-	double distanceChange = 0.0;
-
-	if (!firstMeasurement) {
-		distanceChange = relativeDistance - lastRelativeDistance;
-	}
-	lastRelativeDistance = relativeDistance;
-	firstMeasurement = false;
-
-	static int printCounter = 0;
-	if (++printCounter % 60 == 0) { // 每60帧打印一次
-		//std::cout << "[Calibration] Top relative to Bot: "
-		//	<< "Pos=" << (topRelPos * 1000).str(1) << " mm" << std::endl;
-
-		// ★ 新增：打印红绿球相对距离信息
-		std::cout << "[RED-GREEN Distance] Current: " << std::fixed << std::setprecision(4)
-			<< relativeDistance * 1000 << " mm";
-				std::cout << "[Top in Bot frame] Position: ("
-			<< std::fixed << std::setprecision(2)
-			<< topRelPos.x() * 1000 << ", "
-			<< topRelPos.y() * 1000 << ", "
-			<< topRelPos.z() * 1000 << ") mm" << std::endl;
-		//if (!firstMeasurement) {
-		//	std::cout << " | Change: " << std::setprecision(2) << distanceChange * 1000 << " mm";
-		//	if (std::abs(distanceChange * 1000) > 0.1) {  // 如果变化超过0.1mm
-		//		std::cout << " *** MOVEMENT DETECTED ***";
-		//	}
-		//}
-		//std::cout << std::endl;
-
-		//// ★ 新增：打印相对向量的各个分量
-		//std::cout << "[RED-GREEN Vector] X=" << relativeVector.x() * 1000
-		//	<< " Y=" << relativeVector.y() * 1000
-		//	<< " Z=" << relativeVector.z() * 1000 << " mm" << std::endl;
-
-		//std::cout << "[Debug] Sphere positions - "
-		//	<< "Finger: " << fingerPos.str(3) << " "
-		//	<< "Actuator: " << actuatorPos.str(3) << " "
-		//	<< "Bot: " << botPosWorld.str(3) << " "
-		//	<< "Top: " << topPosWorld.str(3) << std::endl;
+		static int printCounter = 0;
+		if (++printCounter % 60 == 0) {
+			std::cout << "[Calibration] Not calibrated. RED-GREEN Distance: "
+				<< std::fixed << std::setprecision(4)
+				<< relativeDistance * 1000 << " mm" << std::endl;
+			std::cout << "[Calibration] Press 'C' to enter calibration mode" << std::endl;
+		}
 	}
 }
-
 
 
 
@@ -2613,6 +2802,19 @@ if (experimentMode && userStudy && userStudy->isTrialActive()) {
 	leftCube->setEnabled(true);
 	rightCube->setEnabled(true);
 
+	// ★ 每次进入实验模式都检查并修复 NaN
+	if (!std::isfinite(presCurr.x()) || !std::isfinite(presCurr.y()) || !std::isfinite(presCurr.z())) {
+		presCurr = ResolvedRateControl.m_initPressure;
+		std::cout << "[EXP] Detected NaN in pressure, reset to: " << presCurr.str() << std::endl;
+	}
+
+	// 如果还没初始化，也要初始化
+	if (!hasInitPress) {
+		presCurr = ResolvedRateControl.m_initPressure;
+		hasInitPress = true;
+		std::cout << "[EXP] Initial pressure set to: " << presCurr.str() << std::endl;
+	}
+
 	// 根据当前试次设置刚度
 	double refStiffness = userStudy->getCurrentReferenceStiffness();
 	double compStiffness = userStudy->getCurrentComparisonStiffness();
@@ -2661,8 +2863,8 @@ if (experimentMode && userStudy && userStudy->isTrialActive()) {
 	cVector3d interactionForce = tool->getDeviceGlobalForce();
 
 	// 力到位移映射参数
-	static const double forceToDisplacementScale = 0.001; // 1N -> 1mm位移
-	static const double maxDisplacement = 0.01; // 最大位移10mm
+	static const double forceToDisplacementScale = 0.0001; // 1N -> 1mm位移
+	static const double maxDisplacement = 0.05; // 最大位移10mm
 	static const double forceDeadZone = 0.1; // 力的死区 0.1N
 
 	// 应用死区处理
@@ -2687,25 +2889,62 @@ if (experimentMode && userStudy && userStudy->isTrialActive()) {
 	// 计算目标tip位置
 	cVector3d targetTipPosition = baseTipPosition + tipDisplacement;
 
-	// 通过PCC模型计算所需压力
-	cVector3d targetPosMM = targetTipPosition * 1000; // 转换为mm
 
 	// 使用运动学模型计算压力
-	auto result = ResolvedRateControl.updateMotion(presCurr, targetPosMM);
-	cVector3d modeledPosition = result[0];
-	cVector3d newPressure = result[1];
+	cVector3d targetPosMM = targetTipPosition * 1000; // 转换为mm
 
-	// 发送压力到Arduino
-	std::string sendStr = newPressure.str();
+	// 使用运动学模型计算压力（迭代方式）
+	const double errorThreshold = 0.1;  // 误差阈值 (mm)
+	const int maxIterations = 100;      // 最大迭代次数
+	int iterations = 0;
+
+	// 迭代计算直到误差足够小
+	while (iterations < maxIterations) {
+		std::cout << "[DEBUG] Iteration " << iterations
+			<< " - presCurr: " << presCurr.str()
+			<< ", targetPosMM: " << targetPosMM.str() << std::endl;
+
+		auto result = ResolvedRateControl.updateMotion(presCurr, targetPosMM);
+		cVector3d modeledPosition = result[0];
+		cVector3d newPressure = result[1];
+
+		// 计算误差
+		double error = (modeledPosition - targetPosMM).length();
+
+		std::cout << "[DEBUG] Iteration " << iterations
+			<< " - error: " << error << "mm"
+			<< ", newPressure: " << newPressure.str() << std::endl;
+
+		// 检查是否收敛
+		if (error < errorThreshold) {
+			std::cout << "[DEBUG] Converged after " << iterations << " iterations" << std::endl;
+			break;
+		}
+
+		// 验证新压力值
+		if (!std::isfinite(newPressure.x()) ||
+			!std::isfinite(newPressure.y()) ||
+			!std::isfinite(newPressure.z())) {
+			std::cout << "[EXP] ERROR: Invalid pressure calculated, stopping iteration" << std::endl;
+			break;
+		}
+
+		// 更新压力值，继续迭代
+		presCurr = newPressure;
+		iterations++;
+	}
+
+	// 迭代完成后发送压力到Arduino
+	std::string sendStr = presCurr.str();
 	arduinoWriteData(50, sendStr);
-	presCurr = newPressure;
 
 	// 单行实时调试输出
 	std::cout << std::fixed << std::setprecision(2)
 		<< "[EXP] Force:" << interactionForce.str(2) << "N "
 		<< "Disp:" << (tipDisplacement * 1000).str(1) << "mm "
 		<< "Target:" << targetTipPosition.str(3) << "m "
-		<< "Press:" << newPressure.str(1) << "kPa "
+		<< "Press:" << presCurr.str(1) << "kPa "
+		<< "Iter:" << iterations << " "
 		<< "Touch:L=" << (currentlyTouchingLeft ? "Y" : "N")
 		<< ",R=" << (currentlyTouchingRight ? "Y" : "N") << "    \r";
 }
