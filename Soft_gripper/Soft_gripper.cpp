@@ -109,7 +109,6 @@ static double g_trajectoryStartTime = 0.0;
 // This accumulator persists across multiple calls to updateHaptics
 //static cVector3d pressureAccum(0.0, 0.0, 0.0);
 bool g_enableControl = false;
-std::atomic<bool> g_doMTZero{ false };   // 之前是 bool
 cVector3d ZeroPressure(0, 0, 0);
 static mtw::MicronTracker MT;
 bool mtZeroMarkers(mtw::MicronTracker& MT, double h0_mm);
@@ -377,23 +376,6 @@ cLabel* labelCalibrationStatus = nullptr;
 //--------------------------------------------------------------
 //  保存调零时抓到的基准
 //--------------------------------------------------------------
-struct MTZeroFrame
-{
-	// --- fr 在相机坐标系下的零点姿态 ---
-	double frPos[3]{};
-	double frR[9]{};          // col-major
-
-	// --- Actuator 在相机坐标系下的零点姿态 ---
-	double actPos[3]{};      // ★ 添加这行
-	double actR[9]{};        // ★ 添加这行
-
-	// --- Actuator 在 fr 坐标系下的"应扣除"量 ---
-	double relPosOff[3]{};    // (Δp₀ - (0,0,h₀))  ，单位 mm
-	double relROff[9]{};      // 相对旋转零点 (col-major)
-
-	bool   valid{ false };
-
-} g_mtZero;
 
 cVector3d g_calibTopInBotRef;
 
@@ -551,28 +533,6 @@ bool getMTMarkerPosition(const std::string& markerName,
 		// 检查是否有调零
 		double finalPos[3];
 		double finalRot[9];
-
-		if (g_mtZero.valid) {
-			// 应用调零（假设这是finger marker的情况，actuator需要另外处理）
-			for (int i = 0; i < 3; ++i) {
-				finalPos[i] = basePos[i] - g_mtZero.frPos[i];
-			}
-
-			// 旋转矩阵调零：R_relative = R_current * R_zero^T
-			for (int r = 0; r < 3; ++r) {
-				for (int c = 0; c < 3; ++c) {
-					finalRot[c * 3 + r] =
-						baseRot[c * 3 + 0] * g_mtZero.frR[r * 3 + 0] +
-						baseRot[c * 3 + 1] * g_mtZero.frR[r * 3 + 1] +
-						baseRot[c * 3 + 2] * g_mtZero.frR[r * 3 + 2];
-				}
-			}
-		}
-		else {
-			// 没有调零，直接使用base坐标
-			std::memcpy(finalPos, basePos, sizeof(finalPos));
-			std::memcpy(finalRot, baseRot, sizeof(finalRot));
-		}
 
 		// 直接映射到CHAI3D坐标系（不进行XY交换和Z反向）
 		outPos.set(finalPos[0] * 0.001,     // X对应X
@@ -787,8 +747,8 @@ int main(int argc, char* argv[])
 	// hide the device sphere. only show proxy.
 	tool->setShowContactPoints(true, false);
 
-	tool->setShowFrame(true);        // 显示坐标轴
-	tool->setFrameSize(0.02);        // 设置坐标轴长度为20mm
+	//tool->setShowFrame(true);        // 显示坐标轴
+	//tool->setFrameSize(0.02);        // 设置坐标轴长度为20mm
 
 
 	// enable if objects in the scene are going to rotate of translate
@@ -1335,17 +1295,6 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 			std::cout << "[Main] MT not available" << std::endl;
 		}
 }
-	else if (a_key == GLFW_KEY_B)
-	{
-		// 调零功能
-		if (g_mtAvailable) {
-			g_doMTZero = true;  // 设置调零标志，MTLoop会检测并执行
-			std::cout << "[Main] Triggering MT zero calibration..." << std::endl;
-		}
-		else {
-			std::cout << "[Main] MT not available, cannot perform zero calibration" << std::endl;
-		}
-}
 		// 在现有按键处理后添加
 	else if (a_key == GLFW_KEY_E)
 	{
@@ -1845,15 +1794,6 @@ void MTLoop()
 			std::lock_guard<std::mutex> lk(g_mtMtx);
 			g_mtSnap = snap;
 		}
-		if (g_doMTZero.exchange(false))      // 把标志原子置回 false
-		{
-			const double h0_mm = ResolvedRateControl.h_0;      // 你的机械零点高度
-			if (mtZeroMarkers(MT, h0_mm))
-				std::cout << "[MT] zero done (from MTLoop)\n";
-			else
-				std::cerr << "[MT] zero failed\n";
-
-		}
 	}
 }
 
@@ -2156,167 +2096,88 @@ void updateHaptics(void)
 		double actCamRot[9];
 		std::memcpy(actCamRot, act.rot, 9 * sizeof(double));
 
-		//------------------------------------------------------------
-		// 4) 调零：位置（基于base坐标系或相机坐标系）
-		//------------------------------------------------------------
-		double frZeroPos[3];
-		double frRotZero[9];
-		double relZeroPos[3];
-		double relRotCorr[9];
+		////------------------------------------------------------------
+		//// 4) 处理位置和旋转（不再调零，直接使用原始值或base转换后的值）
+		////------------------------------------------------------------
+		double frFinalPos[3];
+		double frFinalRot[9];
+		double actFinalPos[3];
+		double actFinalRot[9];
+		double relFinalPos[3];
+		double relFinalRot[9];
 
-		// ----- fr的调零 -----
-		if (g_mtZero.valid && g_baseRef.valid) {
-			// Step 1: 转换到base坐标系
+		// ----- 处理 finger 位姿 -----
+		if (g_baseRef.valid) {
+			// 只进行base坐标系转换，不调零
 			double frBasePos[3], frBaseRot[9];
 			transformCameraToBase(frCamPos, frCamRot, frBasePos, frBaseRot);
 
-			// Step 2: 在base坐标系中进行调零
-			for (int i = 0; i < 3; ++i) {
-				frZeroPos[i] = frBasePos[i] - g_mtZero.frPos[i];
-			}
-
-			// 旋转调零：R_relative = R_current * R_zero^T
-			for (int r = 0; r < 3; ++r) {
-				for (int c = 0; c < 3; ++c) {
-					frRotZero[c * 3 + r] =
-						frBaseRot[c * 3 + 0] * g_mtZero.frR[r * 3 + 0] +
-						frBaseRot[c * 3 + 1] * g_mtZero.frR[r * 3 + 1] +
-						frBaseRot[c * 3 + 2] * g_mtZero.frR[r * 3 + 2];
-				}
-			}
-		}
-		else if (g_baseRef.valid && !g_mtZero.valid) {
-			// 只有base参考，没有调零
-			transformCameraToBase(frCamPos, frCamRot, frZeroPos, frRotZero);
-		}
-		else if (g_mtZero.valid && !g_baseRef.valid) {
-			// 只有调零，没有base（使用原来的逻辑）
-			for (int r = 0; r < 3; ++r) {
-				frZeroPos[r] =
-					g_mtZero.frR[0 * 3 + r] * (fr.pos[0] - g_mtZero.frPos[0]) +
-					g_mtZero.frR[1 * 3 + r] * (fr.pos[1] - g_mtZero.frPos[1]) +
-					g_mtZero.frR[2 * 3 + r] * (fr.pos[2] - g_mtZero.frPos[2]);
-			}
-			for (int r = 0; r < 3; ++r)
-				for (int c = 0; c < 3; ++c)
-					frRotZero[c * 3 + r] =
-					g_mtZero.frR[0 * 3 + r] * fr.rot[0 * 3 + c] +
-					g_mtZero.frR[1 * 3 + r] * fr.rot[1 * 3 + c] +
-					g_mtZero.frR[2 * 3 + r] * fr.rot[2 * 3 + c];
+			for (int i = 0; i < 3; ++i) frFinalPos[i] = frBasePos[i];
+			for (int i = 0; i < 9; ++i) frFinalRot[i] = frBaseRot[i];
 		}
 		else {
-			// 没有base也没有调零，使用原始值
-			for (int i = 0; i < 3; ++i) frZeroPos[i] = fr.pos[i];
-			for (int i = 0; i < 9; ++i) frRotZero[i] = fr.rot[i];
+			// 直接使用原始值
+			for (int i = 0; i < 3; ++i) frFinalPos[i] = fr.pos[i];
+			for (int i = 0; i < 9; ++i) frFinalRot[i] = fr.rot[i];
 		}
 
-		// ----- actuator的调零 -----
-		double actZeroPos[3];
-		double actRotZero[9];
+		// ----- 处理 actuator 位姿 -----
+		if (okAct) {
+			if (g_baseRef.valid) {
+				double actBasePos[3], actBaseRot[9];
+				transformCameraToBase(actCamPos, actCamRot, actBasePos, actBaseRot);
 
-		if (okAct && g_mtZero.valid && g_baseRef.valid) {
-			// Step 1: 转换到base坐标系
-			double actBasePos[3], actBaseRot[9];
-			transformCameraToBase(actCamPos, actCamRot, actBasePos, actBaseRot);
-
-			// Step 2: 在base坐标系中进行调零
-			for (int i = 0; i < 3; ++i) {
-				actZeroPos[i] = actBasePos[i] - g_mtZero.actPos[i];
+				for (int i = 0; i < 3; ++i) actFinalPos[i] = actBasePos[i];
+				for (int i = 0; i < 9; ++i) actFinalRot[i] = actBaseRot[i];
 			}
-
-			for (int r = 0; r < 3; ++r) {
-				for (int c = 0; c < 3; ++c) {
-					actRotZero[c * 3 + r] =
-						actBaseRot[c * 3 + 0] * g_mtZero.actR[r * 3 + 0] +
-						actBaseRot[c * 3 + 1] * g_mtZero.actR[r * 3 + 1] +
-						actBaseRot[c * 3 + 2] * g_mtZero.actR[r * 3 + 2];
-				}
+			else {
+				for (int i = 0; i < 3; ++i) actFinalPos[i] = act.pos[i];
+				for (int i = 0; i < 9; ++i) actFinalRot[i] = act.rot[i];
 			}
 		}
-		else if (okAct && g_baseRef.valid && !g_mtZero.valid) {
-			transformCameraToBase(actCamPos, actCamRot, actZeroPos, actRotZero);
-		}
-		else if (okAct && g_mtZero.valid && !g_baseRef.valid) {
-			// 原来的调零逻辑（基于相机坐标）
-			for (int r = 0; r < 3; ++r) {
-				actZeroPos[r] =
-					g_mtZero.frR[0 * 3 + r] * (act.pos[0] - g_mtZero.frPos[0]) +
-					g_mtZero.frR[1 * 3 + r] * (act.pos[1] - g_mtZero.frPos[1]) +
-					g_mtZero.frR[2 * 3 + r] * (act.pos[2] - g_mtZero.frPos[2]);
-			}
-			for (int r = 0; r < 3; ++r)
-				for (int c = 0; c < 3; ++c)
-					actRotZero[c * 3 + r] =
-					g_mtZero.frR[0 * 3 + r] * act.rot[0 * 3 + c] +
-					g_mtZero.frR[1 * 3 + r] * act.rot[1 * 3 + c] +
-					g_mtZero.frR[2 * 3 + r] * act.rot[2 * 3 + c];
-		}
-		else if (okAct) {
-			for (int i = 0; i < 3; ++i) actZeroPos[i] = act.pos[i];
-			for (int i = 0; i < 9; ++i) actRotZero[i] = act.rot[i];
+
+		// ----- 处理相对位姿 -----
+		if (okRel) {
+			for (int i = 0; i < 3; ++i) relFinalPos[i] = relPos[i];
+			for (int i = 0; i < 9; ++i) relFinalRot[i] = relRot[i];
 		}
 
-		// ----- rel的调零（相对位姿的特殊处理）-----
-		if (okRel && g_mtZero.valid) {
-			double d[3] = {
-				relPos[0] - g_mtZero.relPosOff[0],
-				relPos[1] - g_mtZero.relPosOff[1],
-				relPos[2] - g_mtZero.relPosOff[2]
-			};
-
-			double Rrow[9];
-			colToRow(g_mtZero.relROff, Rrow);
-			mulRT(Rrow, d, relZeroPos);
-
-			for (int r = 0; r < 3; ++r)
-				for (int c = 0; c < 3; ++c)
-					relRotCorr[c * 3 + r] =
-					g_mtZero.relROff[0 * 3 + r] * relRot[0 * 3 + c] +
-					g_mtZero.relROff[1 * 3 + r] * relRot[1 * 3 + c] +
-					g_mtZero.relROff[2 * 3 + r] * relRot[2 * 3 + c];
-		}
-		else {
-			for (int i = 0; i < 3; ++i) relZeroPos[i] = relPos[i];
-			for (int i = 0; i < 9; ++i) relRotCorr[i] = relRot[i];
-		}
-
-		//------------------------------------------------------------
-		// 6) 渲染 (mm→m ×0.001)
-		//------------------------------------------------------------
+		////------------------------------------------------------------
+		//// 6) 渲染 (mm→m ×0.001)
+		////------------------------------------------------------------
 		cVector3d posFrM;
 		cMatrix3d rotFrM;
 
 		if (g_baseRef.valid) {
-			// 先设置base坐标系下的值
 			cVector3d posInBase(
-				frZeroPos[0] * 0.001,    // mm转m
-				frZeroPos[1] * 0.001,
-				frZeroPos[2] * 0.001
+				frFinalPos[0] * 0.001,    // mm转m
+				frFinalPos[1] * 0.001,
+				frFinalPos[2] * 0.001
 			);
 
 			cMatrix3d rotInBase;
 			rotInBase.set(
-				frRotZero[0], frRotZero[3], frRotZero[6],
-				frRotZero[1], frRotZero[4], frRotZero[7],
-				frRotZero[2], frRotZero[5], frRotZero[8]
+				frFinalRot[0], frFinalRot[3], frFinalRot[6],
+				frFinalRot[1], frFinalRot[4], frFinalRot[7],
+				frFinalRot[2], frFinalRot[5], frFinalRot[8]
 			);
 
-			// 应用base到VE的坐标系变换（XY交换，Z反向）
+			// 应用base到VE的坐标系变换
 			posFrM = g_baseToVETransform * posInBase;
 			rotFrM = g_baseToVETransform * rotInBase;
 		}
 		else {
 			// 没有base时的原始逻辑
 			posFrM.set(
-				frZeroPos[0] * 0.001,
-				frZeroPos[1] * 0.001,
-				frZeroPos[2] * 0.001
+				frFinalPos[0] * 0.001,
+				frFinalPos[1] * 0.001,
+				frFinalPos[2] * 0.001
 			);
 
 			rotFrM.set(
-				frRotZero[0], frRotZero[3], frRotZero[6],
-				frRotZero[1], frRotZero[4], frRotZero[7],
-				frRotZero[2], frRotZero[5], frRotZero[8]
+				frFinalRot[0], frFinalRot[3], frFinalRot[6],
+				frFinalRot[1], frFinalRot[4], frFinalRot[7],
+				frFinalRot[2], frFinalRot[5], frFinalRot[8]
 			);
 		}
 
@@ -2325,20 +2186,26 @@ void updateHaptics(void)
 		cylinderBot->setLocalRot(rotFrM);
 
 		// 更新tool位姿
-		tool->setDeviceLocalPos(posFrM);
-		tool->setDeviceLocalRot(rotFrM);
+		//tool->setDeviceLocalPos(posFrM);
+		//tool->setDeviceLocalRot(rotFrM);
+		tool->setLocalPos(posFrM);     // ← 添加此行
+		tool->setLocalRot(rotFrM);      // ← 添加此行
+		tool->setShowFrame(true);           // ← 添加此行，每帧都设置
+		tool->setFrameSize(0.03);          // ← 添加此行，确保大小合适
+
 		tool->updateToolImagePosition();
 		tool->computeInteractionForces();
 
-		// -- rel渲染 --
-		if (okRel && g_mtZero.valid) {
+
+		// -- rel渲染（不再依赖调零状态） --
+		if (okRel) {  // 移除了 g_mtZero.valid 条件
 			cVector3d posRelM;
 			if (g_baseRef.valid) {
 				// 先设置base坐标系下的值
 				cVector3d posRelBase(
-					relZeroPos[0] * 0.001,
-					relZeroPos[1] * 0.001,
-					relZeroPos[2] * 0.001
+					relFinalPos[0] * 0.001,  // 使用 relFinalPos 替代 relZeroPos
+					relFinalPos[1] * 0.001,
+					relFinalPos[2] * 0.001
 				);
 
 				// 应用base到VE的坐标系变换
@@ -2347,58 +2214,50 @@ void updateHaptics(void)
 			else {
 				// 原来的坐标变换
 				posRelM.set(
-					relZeroPos[0] * 0.001,
-					relZeroPos[1] * 0.001,
-					relZeroPos[2] * 0.001
+					relFinalPos[0] * 0.001,  // 使用 relFinalPos 替代 relZeroPos
+					relFinalPos[1] * 0.001,
+					relFinalPos[2] * 0.001
 				);
 			}
 			posRelM += cVector3d(0, 0.1, 0.07);
 
 			cMatrix3d rotRelM;
 			rotRelM.set(
-				relRotCorr[0], relRotCorr[3], relRotCorr[6],
-				relRotCorr[1], relRotCorr[4], relRotCorr[7],
-				relRotCorr[2], relRotCorr[5], relRotCorr[8]
+				relFinalRot[0], relFinalRot[3], relFinalRot[6],  // 使用 relFinalRot 替代 relRotCorr
+				relFinalRot[1], relFinalRot[4], relFinalRot[7],
+				relFinalRot[2], relFinalRot[5], relFinalRot[8]
 			);
 
 			cylinderTopRel->setEnabled(true);
 			cylinderTopRel->setLocalPos(posRelM);
 			cylinderTopRel->setLocalRot(rotRelM);
+		
 
 
-			//--------------------------------------------------------------------
-			// 7)  构造 PNODATA
-			//--------------------------------------------------------------------
-
-
-			if (okRel && g_mtZero.valid)
+			// 7) 构造 PNODATA（不再使用调零后的值）
+			if (okRel)
 			{
-				 //---------- (1) pno_1  ← fr（原始，未调零） ----------
+				// pno_1 ← fr（使用最终处理后的值）
 				{
-					double posFr[3] = { fr.pos[0], fr.pos[1], fr.pos[2] };       // mm
-					double RFr[9] = { fr.rot[0], fr.rot[1], fr.rot[2],
-										fr.rot[3], fr.rot[4], fr.rot[5],
-										fr.rot[6], fr.rot[7], fr.rot[8] };        // 列主序
+					double posFr[3] = { frFinalPos[0], frFinalPos[1], frFinalPos[2] };
+					double RFr[9];
+					for (int i = 0; i < 9; ++i) RFr[i] = frFinalRot[i];
 					pno_1 = makePNO_mm_colRM(posFr, RFr);
 				}
-				// ---------- (2) pno_2  ← act（若 okAct） ----------
+
+				// pno_2 ← act（若 okAct）
 				if (okAct)
 				{
-					// ★ 修改：使用调零后的actuator位置和旋转
-					double posAct[3] = { actZeroPos[0], actZeroPos[1], actZeroPos[2] };   // 使用调零后的值
-					double RAct[9] = { actRotZero[0], actRotZero[1], actRotZero[2],
-										actRotZero[3], actRotZero[4], actRotZero[5],
-										actRotZero[6], actRotZero[7], actRotZero[8] };
+					double posAct[3] = { actFinalPos[0], actFinalPos[1], actFinalPos[2] };
+					double RAct[9];
+					for (int i = 0; i < 9; ++i) RAct[i] = actFinalRot[i];
 					pno_2 = makePNO_mm_colRM(posAct, RAct);
 				}
 
-				// ---------- (3) sensor2CrctPNOArc  ← 调零后的 rel ----------
-				double posRel[3] = { relZeroPos[0], relZeroPos[1], relZeroPos[2] };   // mm
-				double RRel[9] = { relRotCorr[0], relRotCorr[1], relRotCorr[2],
-									 relRotCorr[3], relRotCorr[4], relRotCorr[5],
-									 relRotCorr[6], relRotCorr[7], relRotCorr[8] };
-
-
+				// sensor2CrctPNO ← rel
+				double posRel[3] = { relFinalPos[0], relFinalPos[1], relFinalPos[2] };
+				double RRel[9];
+				for (int i = 0; i < 9; ++i) RRel[i] = relFinalRot[i];
 				sensor2CrctPNO = makePNO_mm_colRM(posRel, RRel);
 			}
 
@@ -3175,97 +3034,6 @@ static inline void mulRT(const double R[9], const double v[3], double o[3])
 	o[0] = R[0] * v[0] + R[3] * v[1] + R[6] * v[2];
 	o[1] = R[1] * v[0] + R[4] * v[1] + R[7] * v[2];
 	o[2] = R[2] * v[0] + R[5] * v[1] + R[8] * v[2];
-}
-
-bool mtZeroMarkers(mtw::MicronTracker& MT, double h0_mm)
-{
-	std::cout << "[MT] Starting zero calibration..." << std::endl;
-	std::cout << "[MT] h0_mm = " << h0_mm << std::endl;
-
-	// 检查base参考系
-	if (g_baseRef.valid) {
-		std::cout << "[MT] Using BASE coordinate system for zero calibration" << std::endl;
-	}
-	else {
-		std::cout << "[MT] WARNING: No base reference, using camera coordinates" << std::endl;
-	}
-
-	// 1) 更新一帧，确保识别成功
-	if (!MT.update()) {
-		std::cerr << "[MT] update failed – cannot zero\n";
-		return false;
-	}
-
-	// 2) 读取 finger / actuator 的绝对姿态
-	mtw::Pose fr, act;
-	bool frOK = MT.getPoseAndRotMat("finger", fr);
-	bool actOK = MT.getPoseAndRotMat("actuator", act);
-
-	if (!frOK || !actOK) {
-		std::cerr << "[MT] pose query failed – cannot zero\n";
-		return false;
-	}
-
-	// 3) 当前 actuator 在 finger 坐标系下的位置、姿态
-	double relPosNow[3];
-	if (!MT.getRelPos("actuator", "finger", relPosNow)) {
-		std::cerr << "[MT] getRelPos failed\n";
-		return false;
-	}
-
-	double relRNow[9];
-	if (!MT.getRelRotMat("actuator", "finger", relRNow)) {
-		std::cerr << "[MT] getRelRotMat failed\n";
-		return false;
-	}
-
-	// 4) 保存基准 - 如果有base，转换到base坐标系
-	if (g_baseRef.valid) {
-		// 转换到base坐标系后保存
-		double frBasePos[3], frBaseRot[9];
-		double actBasePos[3], actBaseRot[9];
-
-		transformCameraToBase(fr.pos, fr.rot, frBasePos, frBaseRot);
-		transformCameraToBase(act.pos, act.rot, actBasePos, actBaseRot);
-
-		for (int i = 0; i < 3; ++i) {
-			g_mtZero.frPos[i] = frBasePos[i];
-			g_mtZero.actPos[i] = actBasePos[i];
-		}
-		for (int i = 0; i < 9; ++i) {
-			g_mtZero.frR[i] = frBaseRot[i];
-			g_mtZero.actR[i] = actBaseRot[i];
-		}
-	}
-	else {
-		// 没有base，直接保存相机坐标
-		for (int i = 0; i < 3; ++i) {
-			g_mtZero.frPos[i] = fr.pos[i];
-			g_mtZero.actPos[i] = act.pos[i];
-		}
-		for (int i = 0; i < 9; ++i) {
-			g_mtZero.frR[i] = fr.rot[i];
-			g_mtZero.actR[i] = act.rot[i];
-		}
-	}
-
-	// 计算相对偏移
-	double z0[3] = { relRNow[6], relRNow[7], relRNow[8] };
-	g_mtZero.relPosOff[0] = relPosNow[0] - h0_mm * z0[0];
-	g_mtZero.relPosOff[1] = relPosNow[1] - h0_mm * z0[1];
-	g_mtZero.relPosOff[2] = relPosNow[2] - h0_mm * z0[2];
-
-	for (int i = 0; i < 9; ++i)
-		g_mtZero.relROff[i] = relRNow[i];
-
-	g_mtZero.valid = true;
-
-	std::cout << "[MT] Zero calibration successful!" << std::endl;
-	if (g_baseRef.valid) {
-		std::cout << "[MT] Coordinates saved in BASE frame" << std::endl;
-	}
-
-	return true;
 }
 
 PNODATA makePNO_mm_colRM(const double pos_mm[3],
