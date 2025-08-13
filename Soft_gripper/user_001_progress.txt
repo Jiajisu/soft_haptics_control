@@ -1,4 +1,4 @@
 # Progress for User: 001
 CurrentGroup 3
-CurrentTrialInGroup 0
-TotalTrialsCompleted 0
+CurrentTrialInGroup 21
+TotalTrialsCompleted 13

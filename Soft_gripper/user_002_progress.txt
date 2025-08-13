@@ -1,0 +1,4 @@
+# Progress for User: 002
+CurrentGroup 0
+CurrentTrialInGroup 0
+TotalTrialsCompleted 0
