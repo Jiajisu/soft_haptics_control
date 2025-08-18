@@ -189,10 +189,18 @@ namespace mtw {
             double R[9];
             mtCheck(Xform3D_RotMatGet(xf_, R), "Xform3D_RotMatGet");
 
-            // 转置（从 row-major 转 col-major）
-            out.rot[0] = R[0]; out.rot[1] = R[3]; out.rot[2] = R[6];
-            out.rot[3] = R[1]; out.rot[4] = R[4]; out.rot[5] = R[7];
-            out.rot[6] = R[2]; out.rot[7] = R[5]; out.rot[8] = R[8];
+            out.rot[0] = R[0];  // row0,col0 -> row0,col0
+            out.rot[1] = R[3];  // row1,col0 -> row0,col1
+            out.rot[2] = R[6];  // row2,col0 -> row0,col2
+
+            out.rot[3] = R[1];  // row0,col1 -> row1,col0
+            out.rot[4] = R[4];  // row1,col1 -> row1,col1
+            out.rot[5] = R[7];  // row2,col1 -> row1,col2
+
+            out.rot[6] = R[2];  // row0,col2 -> row2,col0
+            out.rot[7] = R[5];  // row1,col2 -> row2,col1
+            out.rot[8] = R[8];  // row2,col2 -> row2,col2
+
             return true;
         }
 
