@@ -271,7 +271,106 @@ bool g_calibrationValid = false;
 // 显示calibration提示的标签
 cLabel* labelCalibrationStatus = nullptr;
 
+// 校准文件路径
+const std::string CALIBRATION_FILE = "rigid_body_calibration.txt";
 
+// 保存刚体变换到文件
+bool saveCalibrationToFile() {
+	std::ofstream file(CALIBRATION_FILE);
+	if (!file.is_open()) {
+		std::cerr << "[ERROR] Cannot create calibration file: " << CALIBRATION_FILE << std::endl;
+		return false;
+	}
+
+	// 保存finger_to_bot变换
+	file << "# Finger to Bot Transform\n";
+	file << "finger_to_bot_pos "
+		<< g_T_finger_to_bot_pos.x() << " "
+		<< g_T_finger_to_bot_pos.y() << " "
+		<< g_T_finger_to_bot_pos.z() << "\n";
+
+	file << "finger_to_bot_rot ";
+	for (int i = 0; i < 3; i++) {
+		for (int j = 0; j < 3; j++) {
+			file << g_T_finger_to_bot_rot(i, j) << " ";
+		}
+	}
+	file << "\n";
+
+	// 保存actuator_to_top变换
+	file << "# Actuator to Top Transform\n";
+	file << "actuator_to_top_pos "
+		<< g_T_actuator_to_top_pos.x() << " "
+		<< g_T_actuator_to_top_pos.y() << " "
+		<< g_T_actuator_to_top_pos.z() << "\n";
+
+	file << "actuator_to_top_rot ";
+	for (int i = 0; i < 3; i++) {
+		for (int j = 0; j < 3; j++) {
+			file << g_T_actuator_to_top_rot(i, j) << " ";
+		}
+	}
+	file << "\n";
+
+	file.close();
+	std::cout << "[SUCCESS] Calibration saved to " << CALIBRATION_FILE << std::endl;
+	return true;
+}
+
+// 从文件加载刚体变换
+bool loadCalibrationFromFile() {
+	std::ifstream file(CALIBRATION_FILE);
+	if (!file.is_open()) {
+		return false;
+	}
+
+	std::string line, key;
+	try {
+		while (std::getline(file, line)) {
+			if (line.empty() || line[0] == '#') continue;
+
+			std::istringstream iss(line);
+			iss >> key;
+
+			if (key == "finger_to_bot_pos") {
+				double x, y, z;
+				iss >> x >> y >> z;
+				g_T_finger_to_bot_pos.set(x, y, z);
+			}
+			else if (key == "finger_to_bot_rot") {
+				for (int i = 0; i < 3; i++) {
+					for (int j = 0; j < 3; j++) {
+						iss >> g_T_finger_to_bot_rot(i, j);
+					}
+				}
+			}
+			else if (key == "actuator_to_top_pos") {
+				double x, y, z;
+				iss >> x >> y >> z;
+				g_T_actuator_to_top_pos.set(x, y, z);
+			}
+			else if (key == "actuator_to_top_rot") {
+				for (int i = 0; i < 3; i++) {
+					for (int j = 0; j < 3; j++) {
+						iss >> g_T_actuator_to_top_rot(i, j);
+					}
+				}
+			}
+		}
+
+		file.close();
+		g_calibrationValid = true;
+		std::cout << "[SUCCESS] Calibration loaded from " << CALIBRATION_FILE << std::endl;
+		std::cout << "  Finger to Bot: " << (g_T_finger_to_bot_pos * 1000).str(3) << " mm" << std::endl;
+		std::cout << "  Actuator to Top: " << (g_T_actuator_to_top_pos * 1000).str(3) << " mm" << std::endl;
+		return true;
+	}
+	catch (const std::exception& e) {
+		std::cerr << "[ERROR] Failed to parse calibration file: " << e.what() << std::endl;
+		file.close();
+		return false;
+	}
+}
 
 //--------------------------------------------------------------
 //  保存调零时抓到的基准
@@ -947,6 +1046,9 @@ int main(int argc, char* argv[])
 		g_mtRunning = false;             // 不启动采集线程
 	}
 	//MT.zero(28);
+	if (loadCalibrationFromFile()) {
+		std::cout << "[INIT] Calibration loaded automatically from file" << std::endl;
+	}
 	// setup callback when application exits
 	atexit(close);
 
@@ -1344,20 +1446,58 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 			std::cout << "Press 'T' to start trials" << std::endl;
 		}
 		}
-	else if (a_key == GLFW_KEY_V)  // V for Verify calibration
+	else if (a_key == GLFW_KEY_V)  // V for Verify calibration or Load/Save calibration
 	{
-		g_showCalibrationSpheres = !g_showCalibrationSpheres;
-
-		if (g_showCalibrationSpheres) {
-			std::cout << "[INFO] Calibration verification ON - showing all markers" << std::endl;
-			std::cout << "  Green = Finger, Red = Actuator" << std::endl;
-			std::cout << "  Blue = Bot (calculated), Yellow = Top (calculated)" << std::endl;
+		// 首先尝试加载校准文件
+		if (!g_calibrationValid) {
+			if (loadCalibrationFromFile()) {
+				std::cout << "[INFO] Rigid body transforms loaded from file" << std::endl;
+				g_showCalibrationSpheres = true;
+			}
+			else {
+				std::cout << "[INFO] No calibration file found" << std::endl;
+				std::cout << "Please perform calibration (press 'Z' to enter calibration mode)" << std::endl;
+				std::cout << "After calibration, press 'V' again to save transforms" << std::endl;
+			}
 		}
 		else {
-			std::cout << "[INFO] Calibration verification OFF" << std::endl;
+			// 如果已有有效的校准数据，保存到文件并切换显示
+			if (saveCalibrationToFile()) {
+				std::cout << "[INFO] Rigid body transforms saved to file" << std::endl;
+			}
+
+			// 切换显示状态
+			g_showCalibrationSpheres = !g_showCalibrationSpheres;
+
+			if (g_showCalibrationSpheres) {
+				std::cout << "[INFO] Calibration verification ON - showing all markers" << std::endl;
+				std::cout << "  Green = Finger, Red = Actuator" << std::endl;
+				std::cout << "  Blue = Bot (calculated), Yellow = Top (calculated)" << std::endl;
+
+				// 添加：打开时设置显示坐标轴
+				if (sphereBot) {
+					sphereBot->setShowFrame(true);
+					sphereBot->setFrameSize(0.015);
+				}
+				if (sphereTop) {
+					sphereTop->setShowFrame(true);
+					sphereTop->setFrameSize(0.015);
+				}
+				if (sphereFinger) {
+					sphereFinger->setShowFrame(true);
+					sphereFinger->setFrameSize(0.015);
+				}
+				if (sphereActuator) {
+					sphereActuator->setShowFrame(true);
+					sphereActuator->setFrameSize(0.015);
+				}
+			}
+			else {
+				std::cout << "[INFO] Calibration verification OFF" << std::endl;
+			}
 		}
 
-		// 切换显示状态
+		// 更新球体显示状态
 		if (sphereFinger) sphereFinger->setEnabled(g_showCalibrationSpheres);
 		if (sphereActuator) sphereActuator->setEnabled(g_showCalibrationSpheres);
 		if (sphereBot) sphereBot->setEnabled(g_showCalibrationSpheres);
