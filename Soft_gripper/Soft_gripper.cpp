@@ -40,9 +40,6 @@ cShapeLine* axisX = nullptr;
 cShapeLine* axisY = nullptr;
 cShapeLine* axisZ = nullptr;
 cShapeSphere* sphereTarget = nullptr;
-cShapeCylinder* cylinderTop = nullptr;
-cShapeCylinder* cylinderBot = nullptr;
-cShapeCylinder* cylinderTopRel = nullptr;
 //------------------------------------------------------------------------------
 // 用户实验管理
 //------------------------------------------------------------------------------
@@ -1796,9 +1793,6 @@ void close(void)
 	if (axisY) { delete axisY; axisY = nullptr; }
 	if (axisZ) { delete axisZ; axisZ = nullptr; }
 	if (sphereTarget) { delete sphereTarget; sphereTarget = nullptr; }
-	if (cylinderTop) { delete cylinderTop; cylinderTop = nullptr; }
-	if (cylinderBot) { delete cylinderBot; cylinderBot = nullptr; }
-	if (cylinderTopRel) { delete cylinderTopRel; cylinderTopRel = nullptr; }
 
 	// 在现有清理代码后添加
 	if (userStudy) {
@@ -1907,33 +1901,6 @@ void updateHaptics(void)
 	// ========== 初始化部分（只执行一次）==========
 	static bool hapticsInitialized = false;
 	if (!hapticsInitialized) {
-		// add top and bot cap
-		double radius = 0.005; // 5mm
-		double height = 0.001; // 1mm
-
-		// 创建 cylinderTop
-		if (!cylinderTop) {
-			cylinderTop = new cShapeCylinder(radius, radius, height);
-			cylinderTop->m_material->setGreen();
-			// 注意：cylinderTop 不添加到 world（根据你的原代码）
-		}
-
-		// 创建 cylinderBot
-		if (!cylinderBot) {
-			cylinderBot = new cShapeCylinder(radius, radius, height);
-			cylinderBot->m_material->setRed();
-			world->addChild(cylinderBot);
-		}
-
-		// 创建 cylinderTopRel
-		double relRadius = 0.005;
-		double relHeight = 0.001;
-		if (!cylinderTopRel) {
-			cylinderTopRel = new cShapeCylinder(relRadius, relRadius, relHeight);
-			cylinderTopRel->m_material->setGreenForest();
-			cylinderTopRel->setLocalPos(0, 0, 0.0);
-			world->addChild(cylinderTopRel);
-		}
 
 		// 创建 sphereTarget
 		double sphereRadius = 0.0025; // 小球半径
@@ -1963,7 +1930,7 @@ void updateHaptics(void)
 
 	cVector3d startPos(0.0, 0.0, ResolvedRateControl.h_0 * 0.001);
 
-	// 我们定义一个"sensor2PosOffset"，用于让 sensor2 在无驱动时变成 (0,0,h_0)
+	// 定义一个"sensor2PosOffset"，用于让 sensor2 在无驱动时变成 (0,0,h_0)
 	static cVector3d sensor2PosOffset(0.0, 0.0, 0.0);
 
 	chai3d::cVector3d PointOnCir = allCircles[circleIndex][pointIndex];
@@ -2087,29 +2054,29 @@ void updateHaptics(void)
 		//	<< std::endl;
 		//-----------------------------External iteration-------------------------
 
-		if (!hasInitPress)
-		{
-			presCurr = ResolvedRateControl.m_initPressure;  // (20, 20, 20)
-			hasInitPress = true;       //
-		}
-		cVector3d targetPos = TrajTarget * 1000;
-		auto result = ResolvedRateControl.updateMotion(presCurr, targetPos);
-		chai3d::cVector3d newPos = result[0];
-		chai3d::cVector3d newPressure = result[1];
-		double error = (newPos - targetPos).length();
-		if (error < 0.1)
-		{
-			cVector3d PressuretoArduino = presCurr;
-			//cVector3d PressuretoArduino(20,20,20);
-			std::string sendStr = PressuretoArduino.str();
-			arduinoWriteData(50, sendStr);
-			//std::cout << "sendStr: "
-			//	<< sendStr << std::endl;
-		}
-		else
-		{
-			presCurr = newPressure; 
-		}
+		//if (!hasInitPress)
+		//{
+		//	presCurr = ResolvedRateControl.m_initPressure;  // (20, 20, 20)
+		//	hasInitPress = true;       //
+		//}
+		//cVector3d targetPos = TrajTarget * 1000;
+		//auto result = ResolvedRateControl.updateMotion(presCurr, targetPos);
+		//chai3d::cVector3d newPos = result[0];
+		//chai3d::cVector3d newPressure = result[1];
+		//double error = (newPos - targetPos).length();
+		//if (error < 0.1)
+		//{
+		//	cVector3d PressuretoArduino = presCurr;
+		//	//cVector3d PressuretoArduino(20,20,20);
+		//	std::string sendStr = PressuretoArduino.str();
+		//	arduinoWriteData(50, sendStr);
+		//	//std::cout << "sendStr: "
+		//	//	<< sendStr << std::endl;
+		//}
+		//else
+		//{
+		//	presCurr = newPressure; 
+		//}
 
 		////------------------------------------------------------------
 		//// 1) 读取 fr / Actuator 位姿，先检查返回值
@@ -2151,10 +2118,6 @@ void updateHaptics(void)
 		double actCamRot[9];
 		std::memcpy(actCamRot, act.rot, 9 * sizeof(double));
 
-		////------------------------------------------------------------
-		//// 4) 处理位置和旋转（使用新的变换函数）
-		////------------------------------------------------------------
-
 		// 获取finger的变换
 		cTransform T_finger_ve;
 		T_finger_ve = transformCameraToBase(frCamPos, frCamRot);
@@ -2163,33 +2126,6 @@ void updateHaptics(void)
 		cTransform T_actuator_ve;
 		T_actuator_ve = transformCameraToBase(actCamPos, actCamRot);
 
-		// 处理相对位姿
-		//cTransform T_rel_ve;
-		//if (okRel) {
-		//	if (g_camera_T_base.valid) {
-		//		// 相对位姿也需要进行坐标系变换
-		//		cTransform T_rel_base;
-		//		cVector3d posRelBase(relPos[0] * 0.001, relPos[1] * 0.001, relPos[2] * 0.001);
-		//		cMatrix3d rotRelBase;
-		//		rotRelBase.set(relRot[0], relRot[3], relRot[6],
-		//			relRot[1], relRot[4], relRot[7],
-		//			relRot[2], relRot[5], relRot[8]);
-		//		T_rel_base.setLocalPos(posRelBase);
-		//		T_rel_base.setLocalRot(rotRelBase);
-
-		//		// 应用base到VE的变换
-		//		T_rel_ve = transformBaseToVE(T_rel_base);
-		//	}
-		//	else {
-		//		cVector3d pos(relPos[0] * 0.001, relPos[1] * 0.001, relPos[2] * 0.001);
-		//		cMatrix3d rot;
-		//		rot.set(relRot[0], relRot[3], relRot[6],
-		//			relRot[1], relRot[4], relRot[7],
-		//			relRot[2], relRot[5], relRot[8]);
-		//		T_rel_ve.setLocalPos(pos);
-		//		T_rel_ve.setLocalRot(rot);
-		//	}
-		//}
 
 		////------------------------------------------------------------
 		//// 6) 渲染
@@ -2200,17 +2136,10 @@ void updateHaptics(void)
 		cMatrix3d rotFrM = T_finger_ve.getLocalRot();
 
 		// 更新显示对象
-		cylinderBot->setLocalPos(0, 0.107, 0.07);
-		cylinderBot->setLocalRot(rotFrM);
 
 		// 更新tool位姿
 		tool->setDeviceLocalPos(posFrM);
 		tool->setDeviceLocalRot(rotFrM);
-		//tool->setLocalPos(posFrM);     // ← 添加此行
-		//tool->setLocalRot(rotFrM);      // ← 添加此行
-		//tool->setShowFrame(true);       // ← 添加此行，每帧都设置
-		//tool->setFrameSize(0.03);       // ← 添加此行，确保大小合适
-
 		tool->updateToolImagePosition();
 		tool->computeInteractionForces();
 
@@ -2292,16 +2221,6 @@ void updateHaptics(void)
 		//		writeToCSV(row);
 		//	}
 
-
-
-
-		//}
-		//else
-		//{
-		//	cylinderTopRel->setEnabled(false);      // 隐藏，避免用垃圾值渲染
-		//}
-
-
 		// ★ 将calibration验证代码放在这里 ★
 		// 在获取到snap数据之后，添加calibration验证代码
 		if (g_showCalibrationSpheres && snap.haveFr && snap.haveAct) {
@@ -2350,15 +2269,6 @@ void updateHaptics(void)
 						sphereTop->setLocalPos(world_T_top.getLocalPos());
 						sphereTop->setLocalRot(world_T_top.getLocalRot());
 					}
-
-
-					//// 获取位置并打印（单位：米）
-					//cVector3d bot_pos = world_T_bot.getLocalPos();
-					//cVector3d top_pos = world_T_top.getLocalPos();
-
-					//// 打印位置（转换为毫米）
-					//std::cout << "[BOT] Position: " << (bot_pos * 1000).str(3) << " mm" << std::endl;
-					//std::cout << "[TOP] Position: " << (top_pos * 1000).str(3) << " mm" << std::endl;
 					
 					// ★ 计算top在bot坐标系中的原始位置 ★
 					cTransform bot_T_world(world_T_bot);
@@ -2499,25 +2409,17 @@ if (experimentMode && userStudy && userStudy->isTrialActive()) {
 
 	// 力到位移映射参数
 	static const double forceToDisplacementScale = 0.0001; // 1N -> 1mm位移
-	static const double maxDisplacement = 0.05; // 最大位移10mm
-	static const double forceDeadZone = 0.1; // 力的死区 0.1N
 
-	// 应用死区处理
-	double forceMagnitude = interactionForce.length();
-	if (forceMagnitude < forceDeadZone) {
-		interactionForce.zero();
-	}
+
+	//// 应用死区处理
+	//double forceMagnitude = interactionForce.length();
+	//if (forceMagnitude < forceDeadZone) {
+	//	interactionForce.zero();
+	//}
 
 	// 力到位移的线性映射
 	cVector3d tipDisplacement = interactionForce * forceToDisplacementScale;
-
-	// 限制最大位移
-	double displacementMagnitude = tipDisplacement.length();
-	if (displacementMagnitude > maxDisplacement) {
-		tipDisplacement.normalize();
-		tipDisplacement *= maxDisplacement;
-	}
-
+	
 	// 获取基准位置（软体机器人的自然零位）
 	static cVector3d baseTipPosition(0.0, 0.0, ResolvedRateControl.h_0 * 0.001);
 
@@ -2533,55 +2435,29 @@ if (experimentMode && userStudy && userStudy->isTrialActive()) {
 	const int maxIterations = 100;      // 最大迭代次数
 	int iterations = 0;
 
-	// 迭代计算直到误差足够小
-	while (iterations < maxIterations) {
-		std::cout << "[DEBUG] Iteration " << iterations
-			<< " - presCurr: " << presCurr.str()
-			<< ", targetPosMM: " << targetPosMM.str() << std::endl;
 
-		auto result = ResolvedRateControl.updateMotion(presCurr, targetPosMM);
-		cVector3d modeledPosition = result[0];
-		cVector3d newPressure = result[1];
-
-		// 计算误差
-		double error = (modeledPosition - targetPosMM).length();
-
-		std::cout << "[DEBUG] Iteration " << iterations
-			<< " - error: " << error << "mm"
-			<< ", newPressure: " << newPressure.str() << std::endl;
-
-		// 检查是否收敛
-		if (error < errorThreshold) {
-			std::cout << "[DEBUG] Converged after " << iterations << " iterations" << std::endl;
-			break;
-		}
-
-		// 验证新压力值
-		if (!std::isfinite(newPressure.x()) ||
-			!std::isfinite(newPressure.y()) ||
-			!std::isfinite(newPressure.z())) {
-			std::cout << "[EXP] ERROR: Invalid pressure calculated, stopping iteration" << std::endl;
-			break;
-		}
-
-		// 更新压力值，继续迭代
+	if (!hasInitPress)
+	{
+		presCurr = ResolvedRateControl.m_initPressure;  // 
+		hasInitPress = true;       //
+	}
+	auto result = ResolvedRateControl.updateMotion(presCurr, targetPosMM);
+	chai3d::cVector3d newPos = result[0];
+	chai3d::cVector3d newPressure = result[1];
+	double error = (newPos - targetPosMM).length();
+	if (error < 0.1)
+	{
+		cVector3d PressuretoArduino = presCurr;
+		std::string sendStr = PressuretoArduino.str();
+		arduinoWriteData(50, sendStr);
+		std::cout << "sendStr: "
+			<< sendStr << std::endl;
+	}
+	else
+	{
 		presCurr = newPressure;
-		iterations++;
 	}
 
-	// 迭代完成后发送压力到Arduino
-	std::string sendStr = presCurr.str();
-	arduinoWriteData(50, sendStr);
-
-	// 单行实时调试输出
-	std::cout << std::fixed << std::setprecision(2)
-		<< "[EXP] Force:" << interactionForce.str(2) << "N "
-		<< "Disp:" << (tipDisplacement * 1000).str(1) << "mm "
-		<< "Target:" << targetTipPosition.str(3) << "m "
-		<< "Press:" << presCurr.str(1) << "kPa "
-		<< "Iter:" << iterations << " "
-		<< "Touch:L=" << (currentlyTouchingLeft ? "Y" : "N")
-		<< ",R=" << (currentlyTouchingRight ? "Y" : "N") << "    \r";
 }
 else if (!experimentMode) {
 	// 非实验模式时隐藏立方体
@@ -2611,11 +2487,6 @@ else if (!experimentMode) {
 		presCurr = newPressure;
 	}
 
-}
-else {
-	// 实验模式但无活跃试次时隐藏立方体
-	if (leftCube) leftCube->setEnabled(false);
-	if (rightCube) rightCube->setEnabled(false);
 }
 
 		/////////////////////////////////////////////////////////////////////////
@@ -2934,8 +2805,7 @@ void showOriginalObjects(bool show)
 	if (axisY) axisY->setEnabled(show);
 	if (axisZ) axisZ->setEnabled(show);
 	if (sphereTarget) sphereTarget->setEnabled(show);
-	if (cylinderBot) cylinderBot->setEnabled(show);
-	if (cylinderTopRel) cylinderTopRel->setEnabled(show);
+
 	// cylinderTop 没有添加到world，所以不需要处理
 }
 
