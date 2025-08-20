@@ -372,6 +372,23 @@ bool loadCalibrationFromFile() {
 	}
 }
 
+//------------------------------------------------------------------------------
+// 新归零功能相关变量
+//------------------------------------------------------------------------------
+bool g_zeroCalibrationMode = false;        // 是否在归零模式
+bool g_zeroCalibrationValid = false;       // 归零数据是否有效
+int g_zeroSnapCount = 0;                   // 已采集的snap数量
+const int ZERO_SNAP_SAMPLES = 10;          // 需要采集的snap数量
+
+// 累积和用于计算平均值
+cVector3d g_zeroAccumPos(0, 0, 0);         // 位置累积和
+
+// 归零偏移量
+cVector3d g_zeroOffset(0, 0, 0);           // 计算得到的偏移量
+double g_h0 = 29.45 *0.001;                          // z方向的初始高度
+
+// 归零后的top在bot中的位置
+cVector3d g_top_in_bot_zeroed(0, 0, 0);    // 归零后的位置
 //--------------------------------------------------------------
 //  保存调零时抓到的基准
 //--------------------------------------------------------------
@@ -1321,6 +1338,41 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 			// 更新显示
 			updateExperimentLabels();
 		}
+	}
+	else if (a_key == GLFW_KEY_B)  // 按键 'B' 触发归零
+	{
+		// 安全检查
+		if (!g_mtAvailable) {
+			std::cout << "[ERROR] MicronTracker not available!" << std::endl;
+			return;
+		}
+
+		if (!g_calibrationValid) {
+			std::cout << "[ERROR] Please complete rigid body calibration first (press 'V')" << std::endl;
+			return;
+		}
+
+		if (!g_zeroCalibrationMode) {
+			// 开始归零采集
+			std::cout << "\n[ZERO] ===== Starting Zero Calibration =====" << std::endl;
+			std::cout << "[ZERO] Keep markers stable, collecting "
+				<< ZERO_SNAP_SAMPLES << " samples..." << std::endl;
+			std::cout << "[ZERO] Target zero position: (0, 0, "
+				<< g_h0 * 1000 << ") mm" << std::endl;
+
+			// 重置采集变量
+			g_zeroCalibrationMode = true;
+			g_zeroSnapCount = 0;
+			g_zeroAccumPos.set(0, 0, 0);
+
+		}
+		else {
+			// 取消归零采集
+			std::cout << "[ZERO] Calibration cancelled by user" << std::endl;
+			g_zeroCalibrationMode = false;
+			g_zeroSnapCount = 0;
+			g_zeroAccumPos.set(0, 0, 0);
+		}
 		}
 	else if (a_key == GLFW_KEY_1 && experimentMode)
 	{
@@ -2162,75 +2214,7 @@ void updateHaptics(void)
 		tool->updateToolImagePosition();
 		tool->computeInteractionForces();
 
-		// -- rel渲染 --
-		//if (okRel) {
-		//	cVector3d posRelM = T_rel_ve.getLocalPos();
-		//	cMatrix3d rotRelM = T_rel_ve.getLocalRot();
 
-		//	// 添加偏移
-		//	posRelM += cVector3d(0, 0.1, 0.07);
-
-		//	cylinderTopRel->setEnabled(true);
-		//	cylinderTopRel->setLocalPos(posRelM);
-		//	cylinderTopRel->setLocalRot(rotRelM);
-
-		//	// 7) 构造 PNODATA（需要原始mm单位的数据）
-		//	// 为了构造PNODATA，我们需要获取base坐标系下的原始数据（mm单位）
-		//	if (okRel) {
-		//		// pno_1 ← fr
-		//		if (g_camera_T_base.valid) {
-		//			// 获取base坐标系下的数据
-		//			cTransform T_finger_base = transformCameraToBase(frCamPos, frCamRot);
-		//			cVector3d pos_mm = T_finger_base.getLocalPos() * 1000;  // m转mm
-		//			cMatrix3d rot = T_finger_base.getLocalRot();
-
-		//			double posFr[3] = { pos_mm.x(), pos_mm.y(), pos_mm.z() };
-		//			double RFr[9];
-		//			for (int r = 0; r < 3; r++) {
-		//				for (int c = 0; c < 3; c++) {
-		//					RFr[c * 3 + r] = rot(r, c);  // 转为列主序
-		//				}
-		//			}
-		//			pno_1 = makePNO_mm_colRM(posFr, RFr);
-		//		}
-		//		else {
-		//			double posFr[3] = { fr.pos[0], fr.pos[1], fr.pos[2] };
-		//			double RFr[9];
-		//			for (int i = 0; i < 9; ++i) RFr[i] = fr.rot[i];
-		//			pno_1 = makePNO_mm_colRM(posFr, RFr);
-		//		}
-
-		//		// pno_2 ← act（若 okAct）
-		//		if (okAct) {
-		//			if (g_camera_T_base.valid) {
-		//				cTransform T_actuator_base = transformCameraToBase(actCamPos, actCamRot);
-		//				cVector3d pos_mm = T_actuator_base.getLocalPos() * 1000;
-		//				cMatrix3d rot = T_actuator_base.getLocalRot();
-
-		//				double posAct[3] = { pos_mm.x(), pos_mm.y(), pos_mm.z() };
-		//				double RAct[9];
-		//				for (int r = 0; r < 3; r++) {
-		//					for (int c = 0; c < 3; c++) {
-		//						RAct[c * 3 + r] = rot(r, c);
-		//					}
-		//				}
-		//				pno_2 = makePNO_mm_colRM(posAct, RAct);
-		//			}
-		//			else {
-		//				double posAct[3] = { act.pos[0], act.pos[1], act.pos[2] };
-		//				double RAct[9];
-		//				for (int i = 0; i < 9; ++i) RAct[i] = act.rot[i];
-		//				pno_2 = makePNO_mm_colRM(posAct, RAct);
-		//			}
-		//		}
-
-		//		// sensor2CrctPNO ← rel
-		//		double posRel[3] = { relPos[0], relPos[1], relPos[2] };
-		//		double RRel[9];
-		//		for (int i = 0; i < 9; ++i) RRel[i] = relRot[i];
-		//		sensor2CrctPNO = makePNO_mm_colRM(posRel, RRel);
-		//	}
-		//
 
 		//	//------------------------------P to L model---------------------------------
 
@@ -2367,11 +2351,80 @@ void updateHaptics(void)
 						sphereTop->setLocalRot(world_T_top.getLocalRot());
 					}
 
-					//cTransform bot_T_world(world_T_bot);
-					//bot_T_world.invert();
 
-					//cTransform bot_T_top = bot_T_world * world_T_top;
-					//printTransform(bot_T_top, "bot_T_top");
+					//// 获取位置并打印（单位：米）
+					//cVector3d bot_pos = world_T_bot.getLocalPos();
+					//cVector3d top_pos = world_T_top.getLocalPos();
+
+					//// 打印位置（转换为毫米）
+					//std::cout << "[BOT] Position: " << (bot_pos * 1000).str(3) << " mm" << std::endl;
+					//std::cout << "[TOP] Position: " << (top_pos * 1000).str(3) << " mm" << std::endl;
+					
+					// ★ 计算top在bot坐标系中的原始位置 ★
+					cTransform bot_T_world(world_T_bot);
+					bot_T_world.invert();
+					cTransform bot_T_top = bot_T_world * world_T_top;
+					cVector3d top_in_bot_raw = bot_T_top.getLocalPos();
+
+					// ★ 新归零功能：采集数据 ★
+					if (g_zeroCalibrationMode) {
+						if (g_zeroSnapCount < ZERO_SNAP_SAMPLES) {
+							// 累积位置数据
+							g_zeroAccumPos += top_in_bot_raw;
+							g_zeroSnapCount++;
+							std::cout << "[ZERO] Sample " << g_zeroSnapCount << "/" << ZERO_SNAP_SAMPLES
+								<< ": " << (top_in_bot_raw).str(3) << " mm" << std::endl;
+							// 如果采集完成，计算平均值和偏移
+							if (g_zeroSnapCount >= ZERO_SNAP_SAMPLES) {
+								// 计算平均位置
+								cVector3d avgPos = -g_zeroAccumPos / (double)ZERO_SNAP_SAMPLES;
+								// 计算偏移量：使归零后的位置为 (0, 0, h0)
+								g_zeroOffset.set(avgPos.x(), avgPos.y(), -g_h0 + avgPos.z());
+								// 标记归零完成
+								g_zeroCalibrationValid = true;
+								g_zeroCalibrationMode = false;
+							}
+						}
+					}
+
+					// ★ 应用归零偏移 ★
+					if (g_zeroCalibrationValid) {
+						// 应用偏移得到归零后的位置
+						g_top_in_bot_zeroed = top_in_bot_raw + g_zeroOffset;
+
+						// ★ 新增：z轴取反，转换为毫米，保留1位小数 ★
+						cVector3d g_top_in_bot_processed;
+						g_top_in_bot_processed.set(
+							g_top_in_bot_zeroed.x() * 1000.0,  // x轴转毫米
+							g_top_in_bot_zeroed.y() * 1000.0,  // y轴转毫米
+							-g_top_in_bot_zeroed.z() * 1000.0  // z轴取反并转毫米
+						);
+
+						// 保留1位小数
+						double x_mm = std::round(g_top_in_bot_processed.x() * 10.0) / 10.0;
+						double y_mm = std::round(g_top_in_bot_processed.y() * 10.0) / 10.0;
+						double z_mm = std::round(g_top_in_bot_processed.z() * 10.0) / 10.0;
+
+						// 更新处理后的值
+						g_top_in_bot_processed.set(x_mm, y_mm, z_mm);
+
+						// 减少打印频率，避免刷屏
+						static int printCounter = 0;
+						if (++printCounter % 200 == 0) {  // 每200帧打印一次
+							std::cout << " X: " << x_mm << ", "
+								<< "Y: " << y_mm << ", "
+								<< "Z: " << z_mm << ", " << "\r ";
+						}
+
+						// ★ 如果需要在其他地方使用处理后的值，可以将其存储在全局变量中 ★
+						// 需要在文件开头添加全局变量声明：
+						// cVector3d g_top_in_bot_final;  // 最终处理后的位置（毫米，z轴取反，1位小数）
+						// 
+						// 然后在这里赋值：
+						// g_top_in_bot_final = g_top_in_bot_processed;
+					}
+
+
 				}
 			}
 		}
