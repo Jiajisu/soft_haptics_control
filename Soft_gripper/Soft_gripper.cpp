@@ -126,6 +126,7 @@ struct MTPoseSnapshot {
 };
 MTPoseSnapshot       g_mtSnap;
 std::mutex           g_mtMtx;
+std::mutex           g_sceneMutex;
 std::atomic<bool>    g_mtRunning{ true };
 
 /// mm → m，并把 3×3 行主序矩阵转成 cMatrix3d
@@ -1946,6 +1947,7 @@ void updateHaptics(void)
 	// main haptic simulation loop
 	while (simulationRunning)
 	{
+		std::lock_guard<std::mutex> sceneLock(g_sceneMutex);
 		/////////////////////////////////////////////////////////////////////////
 		// HAPTIC RENDERING
 		/////////////////////////////////////////////////////////////////////////
@@ -2777,6 +2779,7 @@ PNODATA makePNO_mm_colRM(const double pos_mm[3],
 
 void showOriginalObjects(bool show)
 {
+	std::lock_guard<std::mutex> lock(g_sceneMutex);
 	// 隐藏/显示原始对象
 	if (base) base->setEnabled(show);
 	if (box) box->setEnabled(show);
@@ -2794,6 +2797,7 @@ void showOriginalObjects(bool show)
 
 void showExperimentObjects(bool show)
 {
+	std::lock_guard<std::mutex> lock(g_sceneMutex);
 	// 显示/隐藏实验立方体
 	if (leftCube) leftCube->setEnabled(show);
 	if (rightCube) rightCube->setEnabled(show);
@@ -2886,6 +2890,7 @@ void updateExperimentLabels()
 // 在文件末尾实现这个函数
 void updateSurfaceOrientation(FeedbackDirection direction)
 {
+	std::lock_guard<std::mutex> lock(g_sceneMutex);
 	if (!leftCube || !rightCube) return;
 
 	// 清除现有的几何体

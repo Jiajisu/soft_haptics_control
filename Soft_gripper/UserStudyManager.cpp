@@ -14,7 +14,7 @@ UserStudyManager::UserStudyManager()
     , m_referenceStiffness(1000.0)
     , m_sequenceLoaded(false)
     , m_experimentState(ExperimentState::NOT_STARTED)
-    , m_csvFileReady(false)  // ★ 确认这行存在
+    , m_csvFileReady(false)  // ? ??????
 {
     generateComparisonStiffnesses();
 }
@@ -23,7 +23,7 @@ UserStudyManager::~UserStudyManager()
 {
     if (!m_results.empty()) {
         saveResults("user_" + m_userId + "_results.csv");
-        saveProgress(); // 保存最终进度
+        saveProgress(); // ??????
     }
 }
 
@@ -35,26 +35,26 @@ void UserStudyManager::generateComparisonStiffnesses()
         m_comparisonStiffnesses.push_back(m_referenceStiffness * r);
 }
 
-// 新增：加载或创建用户会话
-// 修改 loadOrCreateUserSession 函数
-// 在 UserStudyManager.cpp 中，修改 loadOrCreateUserSession 函数：
+// ??:?????????
+// ?? loadOrCreateUserSession ??
+// ? UserStudyManager.cpp ?,?? loadOrCreateUserSession ??:
 
 bool UserStudyManager::loadOrCreateUserSession(const std::string& userId)
 {
     m_userId = userId;
 
-    std::cout << "[UserStudy] Setting user ID: " << userId << std::endl;  // 调试输出
+    std::cout << "[UserStudy] Setting user ID: " << userId << std::endl;  // ????
 
-    // 尝试加载已有的序列文件
+    // ???????????
     if (loadSequenceFromFile(getSequenceFilename())) {
         std::cout << "[UserStudy] Loaded existing sequence for user: " << userId << std::endl;
 
-        // 尝试加载进度
+        // ??????
         if (loadProgress(getProgressFilename())) {
             std::cout << "[UserStudy] Resumed from Group " << m_currentTrialGroup + 1
                 << "/6, Trial " << m_currentTrialInGroup + 1 << "/110" << std::endl;
 
-            // 检查实验状态
+            // ??????
             if (m_currentTrialGroup >= 6) {
                 m_experimentState = ExperimentState::EXPERIMENT_COMPLETE;
                 std::cout << "[UserStudy] This user has already completed the experiment!" << std::endl;
@@ -69,18 +69,18 @@ bool UserStudyManager::loadOrCreateUserSession(const std::string& userId)
             }
         }
         else {
-            // 有序列但没有进度，从头开始
+            // ????????,????
             m_experimentState = ExperimentState::READY;
             std::cout << "[UserStudy] Starting from beginning. Press 'T' to start first trial." << std::endl;
         }
     }
     else {
-        // 创建新的随机序列
+        // ????????
         std::cout << "[UserStudy] Creating new sequence for user: " << userId << std::endl;
         generateRandomSequence();
         saveSequenceToFile(getSequenceFilename());
 
-        // 初始化进度
+        // ?????
         m_currentTrialGroup = 0;
         m_currentTrialInGroup = 0;
         m_experimentState = ExperimentState::READY;
@@ -89,7 +89,7 @@ bool UserStudyManager::loadOrCreateUserSession(const std::string& userId)
         std::cout << "[UserStudy] New experiment ready. Press 'T' to start first trial." << std::endl;
     }
 
-    // ★ 重要：在这里添加CSV文件创建调用
+    // ? ??:?????CSV??????
     std::cout << "[UserStudy] Initializing CSV file..." << std::endl;
     createOrLoadUserCSV();
     std::cout << "[UserStudy] CSV initialization complete. Ready: " << (m_csvFileReady ? "YES" : "NO") << std::endl;
@@ -98,12 +98,12 @@ bool UserStudyManager::loadOrCreateUserSession(const std::string& userId)
 }
 
 
-// 生成随机实验序列
+// ????????
 void UserStudyManager::generateRandomSequence()
 {
     m_experimentSequence.clear();
 
-    // 创建6个组的配置 (2 modes × 3 directions)
+    // ??6????? (2 modes � 3 directions)
     std::vector<std::pair<InteractionMode, FeedbackDirection>> groupConfigs = {
         {InteractionMode::FORCE_TO_POSITION, FeedbackDirection::LATERAL_X},
         {InteractionMode::FORCE_TO_POSITION, FeedbackDirection::LATERAL_Y},
@@ -113,12 +113,12 @@ void UserStudyManager::generateRandomSequence()
         {InteractionMode::FORCE_TO_FORCE, FeedbackDirection::VERTICAL_Z}
     };
 
-    // 随机打乱组顺序
+    // ???????
     std::random_device rd;
     std::mt19937 g(rd());
     std::shuffle(groupConfigs.begin(), groupConfigs.end(), g);
 
-    // 为每个组生成随机试次序列
+    // ????????????
     for (const auto& config : groupConfigs) {
         GroupConfig group;
         group.mode = config.first;
@@ -130,19 +130,19 @@ void UserStudyManager::generateRandomSequence()
     m_sequenceLoaded = true;
 }
 
-// 生成一个组内的随机试次序列
+// ?????????????
 std::vector<TrialConfig> UserStudyManager::generateRandomizedTrials()
 {
     std::vector<TrialConfig> trials;
 
-    // 创建110个试次：11个刚度级别，每个重复10次
+    // ??110???:11?????,????10?
     for (int stiffnessIdx = 0; stiffnessIdx < 11; ++stiffnessIdx) {
         for (int rep = 0; rep < 10; ++rep) {
             trials.push_back({ stiffnessIdx, rep });
         }
     }
 
-    // 随机打乱
+    // ????
     std::random_device rd;
     std::mt19937 g(rd());
     std::shuffle(trials.begin(), trials.end(), g);
@@ -150,7 +150,7 @@ std::vector<TrialConfig> UserStudyManager::generateRandomizedTrials()
     return trials;
 }
 
-// 保存序列到文件
+// ???????
 void UserStudyManager::saveSequenceToFile(const std::string& filename)
 {
     std::ofstream file(filename);
@@ -159,7 +159,7 @@ void UserStudyManager::saveSequenceToFile(const std::string& filename)
         return;
     }
 
-    // 写入组顺序
+    // ?????
     file << "# Experiment Sequence for User: " << m_userId << "\n";
     file << "# Format: GroupIndex Mode Direction\n";
 
@@ -170,16 +170,16 @@ void UserStudyManager::saveSequenceToFile(const std::string& filename)
 
     file << "\n# Trial Sequence (StiffnessIndex Repetition)\n";
 
-    // 写入每个组的试次序列
+    // ??????????
     for (size_t groupIdx = 0; groupIdx < m_experimentSequence.size(); ++groupIdx) {
         file << "# Group " << groupIdx << " (110 trials)\n";
         const auto& trials = m_experimentSequence[groupIdx].trials;
 
-        // 确保每组有110个试次
+        // ?????110???
         for (size_t i = 0; i < trials.size(); ++i) {
             file << trials[i].stiffnessIndex << " " << trials[i].repetition;
 
-            // 每行10对数据，便于阅读
+            // ??10???,????
             if ((i + 1) % 10 == 0) {
                 file << "\n";
             }
@@ -188,7 +188,7 @@ void UserStudyManager::saveSequenceToFile(const std::string& filename)
             }
         }
 
-        // 确保组之间有空行
+        // ????????
         if (groupIdx < m_experimentSequence.size() - 1) {
             file << "\n\n";
         }
@@ -198,7 +198,7 @@ void UserStudyManager::saveSequenceToFile(const std::string& filename)
     std::cout << "[UserStudy] Sequence saved to: " << filename << std::endl;
 }
 
-// 从文件加载序列
+// ???????
 bool UserStudyManager::loadSequenceFromFile(const std::string& filename)
 {
     std::ifstream file(filename);
@@ -215,9 +215,9 @@ bool UserStudyManager::loadSequenceFromFile(const std::string& filename)
     std::cout << "[UserStudy] Loading sequence from: " << filename << std::endl;
 
     while (std::getline(file, line)) {
-        // 跳过空行和注释
+        // ???????
         if (line.empty() || line[0] == '#') {
-            // 检查是否开始读取试次序列
+            // ????????????
             if (line.find("Trial Sequence") != std::string::npos) {
                 readingGroups = false;
                 std::cout << "[UserStudy] Starting to read trial sequences..." << std::endl;
@@ -228,13 +228,13 @@ bool UserStudyManager::loadSequenceFromFile(const std::string& filename)
         std::istringstream iss(line);
 
         if (readingGroups && m_experimentSequence.size() < 6) {
-            // 读取组配置
+            // ?????
             int groupIdx, mode, dir;
             if (iss >> groupIdx >> mode >> dir) {
                 GroupConfig group;
                 group.mode = static_cast<InteractionMode>(mode);
                 group.direction = static_cast<FeedbackDirection>(dir);
-                group.trials.clear(); // 确保trials向量是空的
+                group.trials.clear(); // ??trials?????
                 m_experimentSequence.push_back(group);
 
                 std::cout << "[UserStudy] Loaded group " << groupIdx
@@ -242,9 +242,9 @@ bool UserStudyManager::loadSequenceFromFile(const std::string& filename)
             }
         }
         else if (!readingGroups) {
-            // 确定当前正在读取哪个组的试次
+            // ??????????????
             if (currentGroupIdx < 0 || currentGroupIdx >= m_experimentSequence.size()) {
-                // 找到下一个有效的组索引
+                // ???????????
                 for (size_t i = 0; i < m_experimentSequence.size(); ++i) {
                     if (m_experimentSequence[i].trials.size() < 110) {
                         currentGroupIdx = i;
@@ -254,7 +254,7 @@ bool UserStudyManager::loadSequenceFromFile(const std::string& filename)
             }
 
             if (currentGroupIdx >= 0 && currentGroupIdx < m_experimentSequence.size()) {
-                // 读取试次数据
+                // ??????
                 int stiffIdx, rep;
                 while (iss >> stiffIdx >> rep) {
                     if (m_experimentSequence[currentGroupIdx].trials.size() < 110) {
@@ -262,7 +262,7 @@ bool UserStudyManager::loadSequenceFromFile(const std::string& filename)
                     }
                 }
 
-                // 如果当前组已满，移到下一组
+                // ???????,?????
                 if (m_experimentSequence[currentGroupIdx].trials.size() >= 110) {
                     std::cout << "[UserStudy] Group " << currentGroupIdx
                         << " loaded with " << m_experimentSequence[currentGroupIdx].trials.size()
@@ -275,7 +275,7 @@ bool UserStudyManager::loadSequenceFromFile(const std::string& filename)
 
     file.close();
 
-    // 验证加载的数据
+    // ???????
     std::cout << "[UserStudy] Sequence loading complete. Validating..." << std::endl;
     std::cout << "[UserStudy] Total groups loaded: " << m_experimentSequence.size() << std::endl;
 
@@ -307,7 +307,7 @@ bool UserStudyManager::loadSequenceFromFile(const std::string& filename)
     return m_sequenceLoaded;
 }
 
-// 保存进度
+// ????
 void UserStudyManager::saveProgress()
 {
     std::ofstream file(getProgressFilename());
@@ -321,8 +321,8 @@ void UserStudyManager::saveProgress()
     file.close();
 }
 
-// 加载进度
-// 修改 loadProgress 函数，修复读取问题
+// ????
+// ?? loadProgress ??,??????
 bool UserStudyManager::loadProgress(const std::string& filename)
 {
     std::ifstream file(filename);
@@ -344,19 +344,20 @@ bool UserStudyManager::loadProgress(const std::string& filename)
             else if (key == "TotalTrialsCompleted") {
                 int totalCompleted;
                 iss >> totalCompleted;
-                // 可以用来验证数据一致性
+                // ???????????
             }
         }
     }
 
     file.close();
+    sanitizeProgressIndices();
     return true;
 }
 
-// 修改 startNextTrial 函数
+// ?? startNextTrial ??
 void UserStudyManager::startNextTrial()
 {
-    // 检查实验状态
+    // ??????
     if (m_experimentState == ExperimentState::EXPERIMENT_COMPLETE) {
         std::cout << "[UserStudy] Experiment already complete!" << std::endl;
         return;
@@ -372,7 +373,14 @@ void UserStudyManager::startNextTrial()
         return;
     }
 
-    // 边界检查
+    if (m_experimentSequence.empty()) {
+        std::cout << "[UserStudy] ERROR: Experiment sequence is empty!" << std::endl;
+        return;
+    }
+
+    sanitizeProgressIndices();
+
+    // ????
     if (m_currentTrialGroup >= m_experimentSequence.size()) {
         std::cout << "[UserStudy] ERROR: Invalid group index " << m_currentTrialGroup
             << " (max: " << m_experimentSequence.size() - 1 << ")" << std::endl;
@@ -380,7 +388,7 @@ void UserStudyManager::startNextTrial()
         return;
     }
 
-    // 检查是否需要移到下一组
+    // ???????????
     if (m_currentTrialInGroup >= 110) {
         m_currentTrialInGroup = 0;
         m_currentTrialGroup++;
@@ -392,16 +400,16 @@ void UserStudyManager::startNextTrial()
         }
     }
 
-    // 再次检查组索引
+    // ???????
     if (m_currentTrialGroup >= m_experimentSequence.size()) {
         std::cout << "[UserStudy] ERROR: Group index out of bounds!" << std::endl;
         return;
     }
 
-    // 获取当前组配置
+    // ???????
     const auto& currentGroup = m_experimentSequence[m_currentTrialGroup];
 
-    // 检查试次索引
+    // ??????
     if (m_currentTrialInGroup >= currentGroup.trials.size()) {
         std::cout << "[UserStudy] ERROR: Trial index " << m_currentTrialInGroup
             << " out of bounds (max: " << currentGroup.trials.size() - 1 << ")" << std::endl;
@@ -411,24 +419,24 @@ void UserStudyManager::startNextTrial()
     m_currentMode = currentGroup.mode;
     m_currentDirection = currentGroup.direction;
 
-    // 获取当前试次配置
+    // ????????
     const auto& trialConfig = currentGroup.trials[m_currentTrialInGroup];
 
-    // 检查刚度索引
+    // ??????
     if (trialConfig.stiffnessIndex >= m_comparisonStiffnesses.size()) {
         std::cout << "[UserStudy] ERROR: Stiffness index " << trialConfig.stiffnessIndex
             << " out of bounds (max: " << m_comparisonStiffnesses.size() - 1 << ")" << std::endl;
         return;
     }
 
-    // 初始化试次
+    // ?????
     m_currentTrial = TrialResult{};
     m_currentTrial.trialNumber = m_currentTrialGroup * 110 + m_currentTrialInGroup;
     m_currentTrial.referenceStiffness = m_referenceStiffness;
     m_currentTrial.comparisonStiffness = m_comparisonStiffnesses[trialConfig.stiffnessIndex];
     m_currentTrial.touchCountLeft = 0;
     m_currentTrial.touchCountRight = 0;
-    // ★ 修改：记录按T时的时间作为反应时间起点
+    // ? ??:???T????????????
     m_currentTrial.trialStartTime = std::chrono::steady_clock::now();
     m_trialActive = true;
     m_experimentState = ExperimentState::IN_PROGRESS;
@@ -452,7 +460,7 @@ void UserStudyManager::startNextTrial()
         << std::endl;
 }
 
-// 修改 recordUserChoice 函数
+// ?? recordUserChoice ??
 void UserStudyManager::recordUserChoice(int choice)
 {
     if (!m_trialActive || m_experimentState != ExperimentState::IN_PROGRESS) {
@@ -469,7 +477,7 @@ void UserStudyManager::recordUserChoice(int choice)
     m_results.push_back(m_currentTrial);
     m_trialActive = false;
 
-    // 自动写入CSV文件
+    // ????CSV??
     if (m_csvFileReady) {
         writeTrialToCSV(m_currentTrial);
     }
@@ -478,10 +486,10 @@ void UserStudyManager::recordUserChoice(int choice)
         << " | Reaction Time: " << std::fixed << std::setprecision(3)
         << m_currentTrial.reactionTime << "s" << std::endl;
 
-    // 下一试次
+    // ????
     m_currentTrialInGroup++;
 
-    // 检查状态
+    // ????
     if (m_currentTrialInGroup >= 110) {
         m_experimentState = ExperimentState::GROUP_COMPLETE;
         std::cout << "\n[UserStudy] >>> GROUP " << (m_currentTrialGroup + 1)
@@ -501,7 +509,7 @@ void UserStudyManager::recordUserChoice(int choice)
     else {
         m_experimentState = ExperimentState::TRIAL_COMPLETE;
 
-        // 每55个试次提醒休息
+        // ?55???????
         if (m_currentTrialInGroup == 55) {
             std::cout << "\n*** 2-MINUTE BREAK TIME ***" << std::endl;
             std::cout << "You've completed 55 trials. Please rest for 2 minutes." << std::endl;
@@ -510,11 +518,11 @@ void UserStudyManager::recordUserChoice(int choice)
         std::cout << "Press 'T' for next trial." << std::endl;
     }
 
-    // 保存进度
+    // ????
     saveProgress();
 }
 
-// 其余函数保持不变...
+// ????????...
 void UserStudyManager::recordTouch(bool left)
 {
     if (!m_trialActive) return;
@@ -544,7 +552,7 @@ void UserStudyManager::saveResults(const std::string& fn)
         << "UserChoice,ReactionTime,TouchCountLeft,TouchCountRight\n";
 
     for (const auto& r : m_results) {
-        // 获取试次对应的组信息
+        // ??????????
         int groupIdx = r.trialNumber / 110;
         if (groupIdx < m_experimentSequence.size()) {
             const auto& group = m_experimentSequence[groupIdx];
@@ -565,7 +573,7 @@ void UserStudyManager::saveResults(const std::string& fn)
 
 void UserStudyManager::setManualTrialGroup(InteractionMode m, FeedbackDirection d)
 {
-    // 手动设置时，查找匹配的组
+    // ?????,??????
     for (size_t i = 0; i < m_experimentSequence.size(); ++i) {
         if (m_experimentSequence[i].mode == m &&
             m_experimentSequence[i].direction == d) {
@@ -589,6 +597,38 @@ void UserStudyManager::resetCurrentGroup()
     std::cout << "[UserStudy] Group reset.\n";
 }
 
+void UserStudyManager::sanitizeProgressIndices()
+{
+    if (!m_sequenceLoaded || m_experimentSequence.empty()) {
+        m_currentTrialGroup = 0;
+        m_currentTrialInGroup = 0;
+        return;
+    }
+
+    const int groupCount = static_cast<int>(m_experimentSequence.size());
+    if (m_currentTrialGroup < 0 || m_currentTrialGroup >= groupCount) {
+        std::cout << "[UserStudy] WARNING: Invalid group index " << m_currentTrialGroup
+            << ". Resetting to 0." << std::endl;
+        m_currentTrialGroup = 0;
+        m_currentTrialInGroup = 0;
+    }
+
+    const auto& group = m_experimentSequence[m_currentTrialGroup];
+    const int trialsInGroup = static_cast<int>(group.trials.size());
+    if (trialsInGroup == 0) {
+        std::cout << "[UserStudy] WARNING: Group " << m_currentTrialGroup
+            << " has no trials configured. Resetting trial index." << std::endl;
+        m_currentTrialInGroup = 0;
+        return;
+    }
+
+    if (m_currentTrialInGroup < 0 || m_currentTrialInGroup >= trialsInGroup) {
+        std::cout << "[UserStudy] WARNING: Invalid trial index " << m_currentTrialInGroup
+            << " for group " << m_currentTrialGroup << ". Resetting to 0." << std::endl;
+        m_currentTrialInGroup = 0;
+    }
+}
+
 
 void UserStudyManager::initializeTrials()
 {
@@ -596,12 +636,26 @@ void UserStudyManager::initializeTrials()
     std::cout << "[UserStudy] Trials initialized\n";
 }
 
-// 修改 hasNextTrial 函数
+// ?? hasNextTrial ??
 bool UserStudyManager::hasNextTrial()
 {
-    return m_sequenceLoaded &&
-        m_currentTrialGroup < 6 &&
-        m_experimentState != ExperimentState::EXPERIMENT_COMPLETE;
+    if (!m_sequenceLoaded ||
+        m_experimentState == ExperimentState::EXPERIMENT_COMPLETE) {
+        return false;
+    }
+
+    if (m_experimentSequence.empty()) {
+        return false;
+    }
+
+    sanitizeProgressIndices();
+
+    if (m_currentTrialGroup < 0 ||
+        m_currentTrialGroup >= static_cast<int>(m_experimentSequence.size())) {
+        return false;
+    }
+
+    return true;
 }
 
 void UserStudyManager::createOrLoadUserCSV()
@@ -610,7 +664,7 @@ void UserStudyManager::createOrLoadUserCSV()
 
     std::cout << "[UserStudy] CSV filename: " << csvFilename << std::endl;
 
-    // 检查文件是否存在且有内容
+    // ????????????
     std::ifstream checkFile(csvFilename);
     bool fileExists = false;
     if (checkFile.is_open()) {
@@ -630,10 +684,10 @@ void UserStudyManager::createOrLoadUserCSV()
     else {
         std::cout << "[UserStudy] Creating new CSV file: " << csvFilename << std::endl;
 
-        // 创建新文件并写入简化的表头
+        // ?????????????
         std::ofstream newFile(csvFilename, std::ios::out);
         if (newFile.is_open()) {
-            // ★ 修改：简化的表头
+            // ? ??:?????
             std::string header = "TrialNumber,Mode,Direction,ReferenceStiffness,ComparisonStiffness,UserChoice,ReactionTime,TouchCountLeft,TouchCountRight";
             newFile << header << std::endl;
             newFile.flush();
@@ -642,7 +696,7 @@ void UserStudyManager::createOrLoadUserCSV()
 
             newFile.close();
 
-            // 验证写入
+            // ????
             std::ifstream verifyFile(csvFilename);
             if (verifyFile.is_open()) {
                 std::string firstLine;
@@ -674,19 +728,19 @@ void UserStudyManager::createOrLoadUserCSV()
 void UserStudyManager::writeTrialToCSV(const TrialResult& trial)
 {
     std::string csvFilename = getUserCSVFilename();
-    std::ofstream csvFile(csvFilename, std::ios::app);  // 追加模式
+    std::ofstream csvFile(csvFilename, std::ios::app);  // ????
 
     if (!csvFile.is_open()) {
         std::cerr << "[UserStudy] ERROR: Could not open CSV file for writing!" << std::endl;
         return;
     }
 
-    // 获取当前试次对应的组信息
+    // ????????????
     int groupIdx = trial.trialNumber / 110;
     if (groupIdx < m_experimentSequence.size()) {
         const auto& group = m_experimentSequence[groupIdx];
 
-        // ★ 修改：简化的CSV行，去掉UserID、GroupNumber、TrialInGroup、Timestamp
+        // ? ??:???CSV?,??UserID?GroupNumber?TrialInGroup?Timestamp
         csvFile << trial.trialNumber << ","
             << (int)group.mode << ","
             << (int)group.direction << ","
@@ -703,3 +757,5 @@ void UserStudyManager::writeTrialToCSV(const TrialResult& trial)
 
     csvFile.close();
 }
+
+

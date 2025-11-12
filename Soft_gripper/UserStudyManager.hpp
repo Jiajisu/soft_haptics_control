@@ -60,6 +60,7 @@ public:
     /* --- 试次/组控制 --------------------------------------------------- */
     void setManualTrialGroup(InteractionMode mode, FeedbackDirection direction);
     void resetCurrentGroup();
+    void sanitizeProgressIndices();
     bool isGroupComplete() const { return m_currentTrialInGroup >= 110; }
     int getCurrentTrialGroup() const { return m_currentTrialGroup; }
     int getCurrentTrialInGroup() const { return m_currentTrialInGroup; }
@@ -123,7 +124,7 @@ private:
 
     void createOrLoadUserCSV();
     std::string getUserCSVFilename() const { return "user_" + m_userId + "_experiment_data.csv"; }
-  
+
     void writeTrialToCSV(const TrialResult& trial);
     bool m_csvFileReady = false;
 
