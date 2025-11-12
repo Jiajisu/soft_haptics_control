@@ -109,9 +109,9 @@ namespace mtw {
             // 5) 固定曝光 & 可选 HDR
             //-------------------------------------------------
 
-            mtCheck(Camera_AutoExposureSet(cam_, 0), "AutoExposure off");
-            mtCheck(Camera_ShutterMsecsSet(cam_, 3.0), "Shutter 3ms");
-            mtCheck(Camera_GainFSet(cam_, 1.0), "Gain 1.0");
+            //mtCheck(Camera_AutoExposureSet(cam_, 0), "AutoExposure off");
+            //mtCheck(Camera_ShutterMsecsSet(cam_, 3.0), "Shutter 3ms");
+            //mtCheck(Camera_GainFSet(cam_, 1.0), "Gain 1.0");
 
 
             mtCheck(Markers_LoadTemplates(const_cast<char*>(markerDir_.c_str())),
@@ -123,7 +123,7 @@ namespace mtw {
             xf_ = Xform3D_New();
             // ★ 新增：设置相机曝光参数
             mtCheck(Camera_AutoExposureSet(cam_, 0), "AutoExposure off");  // 关闭自动曝光
-            mtCheck(Camera_ShutterMsecsSet(cam_, 0.0), "Shutter 0ms");     // 设置快门时间为0
+            mtCheck(Camera_ShutterMsecsSet(cam_, 0.1), "Shutter 0ms");     // 设置快门时间为0
             mtCheck(Camera_GainFSet(cam_, 17.4), "Gain 17.4");             // 设置增益为17.4
 
             // (2) 把所有已加载模板的 Kalman + 抖动滤波 打开
@@ -175,9 +175,10 @@ namespace mtw {
             {
                 const double dt = ts - lastTs_;
                 if (dt > 1e-6) fps_ = 1.0 / dt;   // Hz
+                //std::cout << "" << 1.0 / dt << "\n";
             }
             lastTs_ = ts;
-            
+
             return true;
         }
 

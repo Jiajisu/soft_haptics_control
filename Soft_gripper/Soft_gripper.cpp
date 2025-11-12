@@ -1051,7 +1051,7 @@ int main(int argc, char* argv[])
 
 		// 使用CHAI3D线程框架，设置为中等优先级（低于haptic但高于普通线程）
 		mtThread = new cThread();
-		mtThread->start(MTLoop, CTHREAD_PRIORITY_GRAPHICS); // 或使用 CTHREAD_PRIORITY_HAPTICS-1
+		mtThread->start(MTLoop, CTHREAD_PRIORITY_HAPTICS); // 或使用 CTHREAD_PRIORITY_HAPTICS-1
 
 		std::cout << "[MT] connected.\n";
 	}
@@ -2145,40 +2145,36 @@ void updateHaptics(void)
 
 
 
-		//	//------------------------------P to L model---------------------------------
+		//	//------------------------------Closed loop ---------------------------------
 
-		//	//cVector3d targetPos = TrajTarget * 1000;  // 目标位置 (mm)
-		//	//if (g_enableControl)
-		//	//{
-		//	//	//std::cout << std::fixed << std::setprecision(2)
-		//	//	//	<< "[sensor2CrctPNOArc] (" << sensor2CrctPNOArc.pos[0] << ", "
-		//	//	//	<< sensor2CrctPNOArc.pos[1] << ", "
-		//	//	//	<< sensor2CrctPNOArc.pos[2] << ") mm    "
-		//	//	//	<< "[targetPos] ( "
-		//	//	//	<< targetPos << " ) mm\r";
-		//	//	auto result = ResolvedRateControl.updateMotionCloseLoop(targetPos, sensor2CrctPNO);
-		//	//	if (!std::isfinite(frZeroPos[0])) {
-		//	//		std::cerr << " Invalid data detected, skip frame\n";
-		//	//		continue;
-		//	//	}
-		//	//	//std::cout << "   targetPos: " << targetPos << "   RELPos: " << sensor2CrctPNO.pos[0] << ", " << sensor2CrctPNO.pos[1] << ", " << sensor2CrctPNO.pos[2] << std::endl;
-		//	//	cVector3d newPos = result[0];       // 计算的新位置
-		//	//	cVector3d newPressure = result[1];  // 计算的新压力
-		//	//	double error = (newPos - targetPos).length();
-		//	//	//std::cout << "Error: " << error << " = " << newPos << " - " << targetPos << std::endl;
-		//	//	//std::cout << "newpos " << newPos << std::endl;
-		//	//	cVector3d PressuretoArduino = presCurr;
-		//	//	//cVector3d PressuretoArduino(20,20,20);
-		//	//	std::string sendStr = PressuretoArduino.str();
-		//	//	arduinoWriteData(50, sendStr);
-		//	//	//std::cout << "sendStr: "
-		//	//	//	<< sendStr << "\r";
-		//	//	presCurr = newPressure; // 
-		//	//}
-
-
-
-
+			cVector3d targetPos = TrajTarget * 1000;  // 目标位置 (mm)
+			if (g_enableControl)
+			{
+				//std::cout << std::fixed << std::setprecision(2)
+				//	<< "[sensor2CrctPNOArc] (" << sensor2CrctPNOArc.pos[0] << ", "
+				//	<< sensor2CrctPNOArc.pos[1] << ", "
+				//	<< sensor2CrctPNOArc.pos[2] << ") mm    "
+				//	<< "[targetPos] ( "
+				//	<< targetPos << " ) mm\r";
+				auto result = ResolvedRateControl.updateMotionCloseLoop(targetPos, sensor2CrctPNO);
+				//if (!std::isfinite(frZeroPos[0])) {
+				//	std::cerr << " Invalid data detected, skip frame\n";
+				//	continue;
+				//}
+				//std::cout << "   targetPos: " << targetPos << "   RELPos: " << sensor2CrctPNO.pos[0] << ", " << sensor2CrctPNO.pos[1] << ", " << sensor2CrctPNO.pos[2] << std::endl;
+				cVector3d newPos = result[0];       // 计算的新位置
+				cVector3d newPressure = result[1];  // 计算的新压力
+				double error = (newPos - targetPos).length();
+				//std::cout << "Error: " << error << " = " << newPos << " - " << targetPos << std::endl;
+				//std::cout << "newpos " << newPos << std::endl;
+				cVector3d PressuretoArduino = presCurr;
+				//cVector3d PressuretoArduino(20,20,20);
+				std::string sendStr = PressuretoArduino.str();
+				arduinoWriteData(50, sendStr);
+				//std::cout << "sendStr: "
+				//	<< sendStr << "\r";
+				presCurr = newPressure; // 
+			}
 		//	if (recordSensorDataToCSV)
 		//	{
 		//		// ① 取 MicronTracker 时间戳（秒）
@@ -2186,7 +2182,6 @@ void updateHaptics(void)
 		//		// ② 拼装 CSV 行
 		//		std::vector<std::string> row;
 		//		row.emplace_back(std::to_string(ts));                // 时间戳
-
 		//		// -- fr --
 		//		row.emplace_back(std::to_string(pno_1.pos[0]));
 		//		row.emplace_back(std::to_string(pno_1.pos[1]));
@@ -2195,7 +2190,6 @@ void updateHaptics(void)
 		//		row.emplace_back(std::to_string(pno_1.ori[1]));
 		//		row.emplace_back(std::to_string(pno_1.ori[2]));
 		//		row.emplace_back(std::to_string(pno_1.ori[3]));
-
 		//		// -- Actuator --
 		//		row.emplace_back(std::to_string(pno_2.pos[0]));
 		//		row.emplace_back(std::to_string(pno_2.pos[1]));
@@ -2204,7 +2198,6 @@ void updateHaptics(void)
 		//		row.emplace_back(std::to_string(pno_2.ori[1]));
 		//		row.emplace_back(std::to_string(pno_2.ori[2]));
 		//		row.emplace_back(std::to_string(pno_2.ori[3]));
-
 		//		// -- Rel (Act → fr) --
 		//		row.emplace_back(std::to_string(sensor2CrctPNO.pos[0]));
 		//		row.emplace_back(std::to_string(sensor2CrctPNO.pos[1]));
@@ -2213,7 +2206,6 @@ void updateHaptics(void)
 		//		row.emplace_back(std::to_string(sensor2CrctPNO.ori[1]));
 		//		row.emplace_back(std::to_string(sensor2CrctPNO.ori[2]));
 		//		row.emplace_back(std::to_string(sensor2CrctPNO.ori[3]));
-
 		//		row.emplace_back(std::to_string(TrajTarget.x()));   // ★
 		//		row.emplace_back(std::to_string(TrajTarget.y()));   // ★
 		//		row.emplace_back(std::to_string(TrajTarget.z()));   // ★
@@ -2347,12 +2339,6 @@ if (experimentMode && userStudy && userStudy->isTrialActive()) {
 	leftCube->setEnabled(true);
 	rightCube->setEnabled(true);
 
-	// ★ 每次进入实验模式都检查并修复 NaN
-	if (!std::isfinite(presCurr.x()) || !std::isfinite(presCurr.y()) || !std::isfinite(presCurr.z())) {
-		presCurr = ResolvedRateControl.m_initPressure;
-		std::cout << "[EXP] Detected NaN in pressure, reset to: " << presCurr.str() << std::endl;
-	}
-
 	// 如果还没初始化，也要初始化
 	if (!hasInitPress) {
 		presCurr = ResolvedRateControl.m_initPressure;
@@ -2402,56 +2388,53 @@ if (experimentMode && userStudy && userStudy->isTrialActive()) {
 	if (!currentlyTouchingRight) isInteractingWithRightCube = false;
 
 	/////////////////////////////////////////////////////////////////////////
-	// 用户实验模式下的力-位移控制
+	// FORCE - DISPLACEMENT 
 	/////////////////////////////////////////////////////////////////////////
-	// 获取触觉设备的交互力（全局坐标系）
+	// get interaction forcr
 	cVector3d interactionForce = tool->getDeviceGlobalForce();
 
-	// 力到位移映射参数
-	static const double forceToDisplacementScale = 0.0001; // 1N -> 1mm位移
-
-
-	//// 应用死区处理
-	//double forceMagnitude = interactionForce.length();
-	//if (forceMagnitude < forceDeadZone) {
-	//	interactionForce.zero();
-	//}
-
-	// 力到位移的线性映射
+	// scale force to tip displacement 
+	static const double forceToDisplacementScale = 0.00018; // 1N -> 0.18mm
 	cVector3d tipDisplacement = interactionForce * forceToDisplacementScale;
 	
-	// 获取基准位置（软体机器人的自然零位）
+	// tip initial pos 
 	static cVector3d baseTipPosition(0.0, 0.0, ResolvedRateControl.h_0 * 0.001);
 
-	// 计算目标tip位置
+	// tip target pos
 	cVector3d targetTipPosition = baseTipPosition + tipDisplacement;
 
 
-	// 使用运动学模型计算压力
-	cVector3d targetPosMM = targetTipPosition * 1000; // 转换为mm
-
-	// 使用运动学模型计算压力（迭代方式）
-	const double errorThreshold = 0.1;  // 误差阈值 (mm)
-	const int maxIterations = 100;      // 最大迭代次数
-	int iterations = 0;
-
+	// rotate to match real world device orientation
+	cVector3d targetPosMM = targetTipPosition * 1000; 
+	targetPosMM.set(
+		-targetPosMM.x()+0.0001, 
+		targetPosMM.y(),   
+		targetPosMM.z()
+	);
+	static const double angle = 210.0 * M_PI / 180.0;  
+	static cMatrix3d rotZ_120(
+		cos(angle), -sin(angle), 0.0,  
+		sin(angle), cos(angle), 0.0,   
+		0.0, 0.0, 1.0    
+	);
+	cVector3d targetPosMM_rotated = rotZ_120 * targetPosMM;
 
 	if (!hasInitPress)
 	{
-		presCurr = ResolvedRateControl.m_initPressure;  // 
-		hasInitPress = true;       //
+		presCurr = ResolvedRateControl.m_initPressure;  
+		hasInitPress = true;       
 	}
-	auto result = ResolvedRateControl.updateMotion(presCurr, targetPosMM);
+	auto result = ResolvedRateControl.updateMotion(presCurr, targetPosMM_rotated);
 	chai3d::cVector3d newPos = result[0];
 	chai3d::cVector3d newPressure = result[1];
-	double error = (newPos - targetPosMM).length();
-	if (error < 0.1)
+	double error = (newPos - targetPosMM_rotated).length();
+	if (error < 0.05)
 	{
 		cVector3d PressuretoArduino = presCurr;
 		std::string sendStr = PressuretoArduino.str();
 		arduinoWriteData(50, sendStr);
-		std::cout << "sendStr: "
-			<< sendStr << std::endl;
+		//std::cout << "sendStr: "
+		//	<< sendStr << std::endl;
 	}
 	else
 	{
@@ -2623,8 +2606,8 @@ void arduinoWriteData(unsigned int delay_time, const std::string& send_str)
 				val = 0.0;
 			}
 			// Then clamp to [-35, 35]
-			if (val < -35.0) val = -35.0;
-			if (val > 40.0) val = 35.0;
+			if (val < -40.0) val = -40.0;
+			if (val > 35.0) val = 35.0;
 
 			values.push_back(val);
 		}
