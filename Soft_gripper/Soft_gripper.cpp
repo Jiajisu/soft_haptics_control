@@ -2093,10 +2093,20 @@ void updateHaptics(void)
 		else {
 			snap.haveFr = false;   // ★ 无 MT 时后面直接跳过
 		}
-		// 若无新数据，直接进入下个循环
-		if (!snap.haveFr) {
-			cSleepMs(0);   // 让线程保持 1 kHz 以上
-			goto FINISH_HAPTIC_CYCLE;
+
+		static MTPoseSnapshot s_lastValidSnap;
+		static bool s_hasLastValid = false;
+		double currentTimeSec = getCurrentTime();
+		if (snap.haveFr) {
+			s_lastValidSnap = snap;
+			s_hasLastValid = true;
+			}
+		else if (s_hasLastValid && (currentTimeSec - s_lastValidSnap.ts) < 0.3) {
+		snap = s_lastValidSnap;
+		}
+		else {
+
+		goto FINISH_HAPTIC_CYCLE;
 		}
 
 		// 把原本 okFr/okAct/relPos/relRot 的逻辑改成走 snap

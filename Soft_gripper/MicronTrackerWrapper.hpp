@@ -95,7 +95,7 @@ namespace mtw {
 
             mtStreamingModeStruct mode{
                 mtFrameType::Alternating,
-                mtDecimation::Dec41,
+                mtDecimation::Dec21,
                 mtBitDepth::Bpp12
             };
             int serial{};
@@ -121,12 +121,16 @@ namespace mtw {
 
             identColl_ = Collection_New();
             xf_ = Xform3D_New();
-            // ★ 新增：设置相机曝光参数
-            mtCheck(Camera_AutoExposureSet(cam_, 0), "AutoExposure off");  // 关闭自动曝光
-            mtCheck(Camera_ShutterMsecsSet(cam_, 0.1), "Shutter 0ms");     // 设置快门时间为0
-            mtCheck(Camera_GainFSet(cam_, 17.4), "Gain 17.4");             // 设置增益为17.4
+            // Sensor exposure tuning
+            mtCheck(Camera_AutoExposureSet(cam_, 0), "AutoExposureSet");
+            mtCheck(Camera_ShutterMsecsSet(cam_, 0.5), "Camera_ShutterMsecsSet");
+            mtCheck(Camera_GainFSet(cam_, 17.2), "Camera_GainFSet");
+            if (Camera_HdrEnabledSet(cam_, true) == mtOK) {
+                mtCheck(Camera_HdrShortCycleSet(cam_, true), "Camera_HdrShortCycleSet");
+                mtCheck(Camera_HdrMinLuxSet(cam_, 10.0), "Camera_HdrMinLuxSet");
+            }
 
-            // (2) 把所有已加载模板的 Kalman + 抖动滤波 打开
+            // (2) 模板滤波参数
             {
                 mtHandle coll = Collection_New();
                 mtCheck(Markers_TemplatesMarkersGet(coll), "TemplatesMarkersGet");
@@ -134,21 +138,14 @@ namespace mtw {
                 for (int i = 1; i <= n; ++i)
                 {
                     mtHandle mk = Collection_Int(coll, i);
-
-                    // 已有：
+                    // 开启 Kalman + 抖动滤波
                     Marker_KalmanNoiseFilterEnabledSet(mk, true);
-                    // 低一点的噪声系数 → 更平滑
-                    Marker_FilterNoiseCoeffSet(mk, cam_, 0.4);   // ← 由 1 改 0.4
-
-                    // ★ 新增：开启角度抖动滤波
-                    Marker_AngularJitterFilterCoefficientSet(mk, 0.8);  // 0.7~0.9 视需求微调
-                    // 可选：再统一一下位置系数
+                    Marker_FilterNoiseCoeffSet(mk, cam_, 0.4);
+                    Marker_AngularJitterFilterCoefficientSet(mk, 0.8);
                     Marker_JitterFilterCoefficientSet(mk, 0.8);
                 }
                 Collection_Free(coll);
             }
-
-          
             // (3) 全局抖动参数（一次）—— 位置 + 角度都调
             Markers_JitterFilterCoefficientSet(0.7);        // 已有
             Markers_AngularJitterFilterCoefficientSet(0.7); // ★ 新增
