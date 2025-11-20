@@ -31,6 +31,10 @@ UserStudyManager::UserStudyManager()
     , m_csvFileReady(false)
     , m_currentPolarity(SurfacePolarity::POSITIVE)
     , m_exp2State(ExperimentState::NOT_STARTED)
+    , m_exp2SequenceLoaded(false)
+    , m_exp2CurrentTrialIndex(0)
+    , m_exp2TrialActive(false)
+    , m_exp2NeedBreak(false)
 {
     generateComparisonStiffnesses();
 }
@@ -412,6 +416,12 @@ bool UserStudyManager::loadProgress(const std::string& filename)
     std::ifstream file(filename);
     if (!file) return false;
 
+    // defaults in case keys missing (backward compatibility)
+    m_exp2CurrentTrialIndex = 0;
+    m_exp2State = ExperimentState::READY;
+    m_exp2NeedBreak = false;
+    m_exp2TrialActive = false;
+
     std::string line;
     while (std::getline(file, line)) {
         if (line.empty() || line[0] == '#') continue;
@@ -784,6 +794,9 @@ void UserStudyManager::recordExp2UserAngles(double userAngleX, double userAngleZ
     }
 
     m_exp2CurrentTrial.confirmTime = std::chrono::steady_clock::now();
+    if (durationSeconds <= 0.0) {
+        durationSeconds = std::chrono::duration<double>(m_exp2CurrentTrial.confirmTime - m_exp2TrialStart).count();
+    }
     m_exp2CurrentTrial.userAngleX = userAngleX;
     m_exp2CurrentTrial.userAngleZ = userAngleZ;
     m_exp2CurrentTrial.durationSeconds = durationSeconds;

@@ -13,7 +13,11 @@
 #include <vector>
 #include <chrono>
 #include <thread>
+#include <atomic>
 #include <mutex>
+#include <limits>
+#include <sstream>
+
 
 
 //------------------------------------------------------------------------------
@@ -31,6 +35,7 @@ using namespace std;
 #include "TrajectoryGenerator.hpp"
 #include "TimeUtil.hpp"
 #include "UserStudyManager.hpp"
+
 
 // ????????????
 //------------------------------------------------------------------------------
@@ -55,6 +60,12 @@ static cVector3d g_rightCubeBasePos(0.0, 0.0, 0.0);
 static bool g_cubeBaseInitialized = false;
 const double kSurfacePolarityOffset = 0.03;
 static FeedbackDirection g_activeSurfaceDirection = FeedbackDirection::VERTICAL_Z;
+cMesh* g_exp2VisiblePlane = nullptr;
+cMesh* g_exp2HiddenPlane = nullptr;
+bool g_exp2PlaneInitialized = false;
+std::atomic<double> g_exp2PendingAngleX{ 0.0 };
+std::atomic<double> g_exp2PendingAngleZ{ 0.0 };
+std::atomic<bool> g_exp2AnglesPending{ false };
 cMesh* leftCubeHighlight = nullptr;
 cMesh* rightCubeHighlight = nullptr;
 const double kHighlightThickness = 0.0005;
@@ -62,15 +73,51 @@ const double kHighlightLift = 0.0000001;
 const double kCubeFaceThickness = 0.004;
 const double kCubeFaceHalfThickness = kCubeFaceThickness * 0.5;
 const cColorf kHighlightColor(1.0f, 0.25f, 0.25f, 1.0f);
+cLabel* labelExp2Debug = nullptr;
 cShapeLine* directionArrow = nullptr;
 const double kArrowLength = 0.01;
 cMesh* directionArrowHead = nullptr;
 const double kArrowHeadHeight = 0.003;
 const double kArrowHeadRadius = 0.0015;
+const double kExp2PlaneWidth = 0.08;
+const double kExp2PlaneHeight = 0.08;
+const double kExp2PlaneThickness = 0.0008;
+const cVector3d kExp2PlaneCenter(0.0, 0.0, 0.03);
+const double kExp2AngleStepDeg = 10.0;
+const double kExp2MinAngleDeg = 0.0;
+const double kExp2MaxAngleDeg = 180.0;
+double g_exp2UserAngleX = 0.0;
+double g_exp2UserAngleZ = 0.0;
+double g_exp2TargetAngleX = 0.0;
+double g_exp2TargetAngleZ = 0.0;
+int g_exp2ActiveTrialNumber = -1;
+bool g_exp2DebugMode = false;
+std::chrono::steady_clock::time_point g_exp2TrialStartTime;
 void updateExperimentLabels();
 void updateSurfaceOrientation(FeedbackDirection direction);
 void applySurfacePolarity(SurfacePolarity polarity);
 void rebuildHighlightMeshes(FeedbackDirection direction);
+void showExperiment2Objects(bool show);
+extern bool hasInitPress;
+extern cVector3d presCurr;
+extern ControlPCC ResolvedRateControl;
+bool ensureUserStudyLoaded();
+void deactivateCurrentExperimentObjects();
+void activateExperimentMode(ExperimentType type);
+void exitExperimentMode();
+void updateExperiment2Labels(const std::string& status = "");
+void applyExp2UserAngles();
+void processPendingExp2AnglesLocked();
+void flushPendingExp2Angles();
+bool startNextExp2Trial();
+static ExperimentType g_activeExperiment = ExperimentType::NONE;
+
+inline double clampAngleValue(double value, double minVal, double maxVal)
+{
+	if (value < minVal) return minVal;
+	if (value > maxVal) return maxVal;
+	return value;
+}
 // ????????????ID
 std::string currentUserId = "";
 //------------------------------------------------------------------------------
@@ -108,6 +155,275 @@ void showExperimentObjects(bool show)
 	}
 }
 
+void showExperiment2Objects(bool show)
+{
+	std::lock_guard<std::mutex> lock(g_sceneMutex);
+	if (g_exp2VisiblePlane) g_exp2VisiblePlane->setEnabled(show);
+
+	if (g_exp2HiddenPlane) {
+		g_exp2HiddenPlane->setEnabled(show);
+		g_exp2HiddenPlane->setUseTransparency(true);
+		g_exp2HiddenPlane->m_material->setBlueRoyal();
+		g_exp2HiddenPlane->m_material->setTransparencyLevel((show && g_exp2DebugMode) ? 0.5 : 0);
+	}
+
+	bool debugVisible = show && g_exp2DebugMode;
+	if (labelExp2Debug) labelExp2Debug->setEnabled(debugVisible);
+	processPendingExp2AnglesLocked();
+}
+
+void applyExp2UserAngles()
+{
+	g_exp2PendingAngleX.store(g_exp2UserAngleX, std::memory_order_relaxed);
+	g_exp2PendingAngleZ.store(g_exp2UserAngleZ, std::memory_order_relaxed);
+	g_exp2AnglesPending.store(true, std::memory_order_release);
+}
+
+void processPendingExp2AnglesLocked()
+{
+	if (!g_exp2AnglesPending.load(std::memory_order_acquire)) {
+		return;
+	}
+
+	if (!g_exp2VisiblePlane || !g_exp2HiddenPlane) {
+		g_exp2AnglesPending.store(false, std::memory_order_release);
+		return;
+	}
+
+	double angleX = g_exp2PendingAngleX.load(std::memory_order_relaxed);
+	double angleZ = g_exp2PendingAngleZ.load(std::memory_order_relaxed);
+
+	cMatrix3d rot;
+	rot.identity();
+	rot.rotateAboutGlobalAxisRad(cVector3d(1.0, 0.0, 0.0), cDegToRad(angleX));
+	rot.rotateAboutGlobalAxisRad(cVector3d(0.0, 0.0, 1.0), cDegToRad(angleZ));
+	g_exp2VisiblePlane->setLocalRot(rot);
+
+	g_exp2AnglesPending.store(false, std::memory_order_release);
+}
+
+void flushPendingExp2Angles()
+{
+	std::lock_guard<std::mutex> lock(g_sceneMutex);
+	processPendingExp2AnglesLocked();
+}
+
+void applyExp2TargetAngles()
+{
+	std::lock_guard<std::mutex> lock(g_sceneMutex);
+	if (!g_exp2HiddenPlane) return;
+
+	cMatrix3d rot;
+	rot.identity();
+	rot.rotateAboutGlobalAxisRad(cVector3d(1.0, 0.0, 0.0), cDegToRad(g_exp2TargetAngleX));
+	rot.rotateAboutGlobalAxisRad(cVector3d(0.0, 0.0, 1.0), cDegToRad(g_exp2TargetAngleZ));
+	g_exp2HiddenPlane->setLocalRot(rot);
+}
+
+bool startNextExp2Trial()
+{
+	if (!userStudy) return false;
+	if (!userStudy->hasNextTrialExp2()) {
+		updateExperiment2Labels("Experiment 2 complete.");
+		return false;
+	}
+
+	userStudy->startNextTrialExp2();
+	g_exp2TargetAngleX = userStudy->getExp2TargetAngleX();
+	g_exp2TargetAngleZ = userStudy->getExp2TargetAngleZ();
+	g_exp2UserAngleX = 0.0;
+	g_exp2UserAngleZ = 0.0;
+	g_exp2ActiveTrialNumber = userStudy->getExp2CurrentTrialIndex();
+	g_exp2TrialStartTime = std::chrono::steady_clock::now();
+	applyExp2TargetAngles();
+	applyExp2UserAngles();
+	flushPendingExp2Angles();
+	updateExperiment2Labels("New trial started. Align surfaces then press SPACE.");
+	return true;
+}
+
+void updateExperiment2Labels(const std::string& status)
+{
+	if (!userStudy) return;
+
+	if (labelExperimentInstructions) {
+		std::ostringstream oss;
+		oss << "ANGULAR DISCRIMINATION EXPERIMENT\n";
+		oss << "Controls: Up/Down adjust X, Left/Right adjust Z ("
+			<< kExp2AngleStepDeg << " deg step)\n";
+		oss << "Press SPACE to confirm, 'T' for next trial, 'R' to exit, 'E' for Experiment 1.\n";
+		if (!status.empty()) {
+			oss << status << "\n";
+		}
+
+		auto state = userStudy->getExp2State();
+		switch (state) {
+		case ExperimentState::NOT_STARTED:
+		case ExperimentState::READY:
+			oss << "Press 'T' to start the next trial.\n";
+			break;
+		case ExperimentState::IN_PROGRESS:
+			oss << "Trial running: match the hidden surface and press SPACE.\n";
+			break;
+		case ExperimentState::TRIAL_COMPLETE:
+			if (userStudy->isExp2BreakPending()) {
+				oss << "Break time! Please rest before pressing 'T' to continue.\n";
+			}
+			else {
+				oss << "Trial recorded. Press 'T' for the next trial.\n";
+			}
+			break;
+		case ExperimentState::EXPERIMENT_COMPLETE:
+			oss << "All trials complete. Thank you!\n";
+			break;
+		default:
+			break;
+		}
+		labelExperimentInstructions->setText(oss.str());
+	}
+
+	if (labelTrialInfo) {
+		std::ostringstream info;
+		int total = userStudy->getExp2TotalTrials();
+		if (total <= 0) total = 180;
+		int displayTrial = userStudy->getExp2CurrentTrialIndex();
+		if (userStudy->isExp2TrialActive() && g_exp2ActiveTrialNumber >= 0) {
+			displayTrial = g_exp2ActiveTrialNumber;
+		}
+		if (userStudy->getExp2State() == ExperimentState::EXPERIMENT_COMPLETE) {
+			displayTrial = total;
+		}
+		int shownIndex = displayTrial;
+		if (total <= 0) {
+			shownIndex = 0;
+		}
+		else {
+			if (shownIndex >= total) shownIndex = total - 1;
+			if (shownIndex < 0) shownIndex = 0;
+		}
+		if (userStudy->getExp2State() != ExperimentState::EXPERIMENT_COMPLETE) {
+			info << "Trial: " << (shownIndex + 1) << "/" << total << "\n";
+		}
+		else {
+			info << "Trial: " << total << "/" << total << "\n";
+		}
+		info << "Target Angles  (X/Z): "
+			<< std::fixed << std::setprecision(1)
+			<< g_exp2TargetAngleX << " / " << g_exp2TargetAngleZ << "\n";
+		info << "Current Angles (X/Z): "
+			<< g_exp2UserAngleX << " / " << g_exp2UserAngleZ;
+		labelTrialInfo->setText(info.str());
+	}
+
+	if (labelExp2Debug) {
+		if (g_exp2DebugMode && g_activeExperiment == ExperimentType::EXPERIMENT2) {
+			std::ostringstream dbg;
+			dbg << "DEBUG\nTarget(X/Z): " << g_exp2TargetAngleX << " / " << g_exp2TargetAngleZ << "\n";
+			dbg << "User  (X/Z): " << g_exp2UserAngleX << " / " << g_exp2UserAngleZ << "\n";
+			dbg << "Delta (X/Z): " << (g_exp2UserAngleX - g_exp2TargetAngleX)
+				<< " / " << (g_exp2UserAngleZ - g_exp2TargetAngleZ);
+			labelExp2Debug->setText(dbg.str());
+		}
+	}
+}
+
+bool ensureUserStudyLoaded()
+{
+	if (userStudy) return true;
+
+	std::cout << "\n=== ENTER USER ID ===\n";
+	std::cout << "Please enter user ID: ";
+
+	if (!(std::cin >> currentUserId)) {
+		std::cin.clear();
+		std::cin.ignore(10000, '\n');  // 使用一个足够大的数字代替
+		std::cout << "[UserStudy] Invalid input. Aborting.\n";
+		return false;
+	}
+
+	hasInitPress = false;
+	presCurr = ResolvedRateControl.m_initPressure;
+
+	userStudy = new UserStudyManager();
+	if (!userStudy->loadOrCreateUserSession(currentUserId)) {
+		std::cerr << "[UserStudy] Failed to load session for user " << currentUserId << "\n";
+		delete userStudy;
+		userStudy = nullptr;
+		return false;
+	}
+
+	userStudy->initializeTrials();
+	return true;
+}
+
+void deactivateCurrentExperimentObjects()
+{
+	if (g_activeExperiment == ExperimentType::EXPERIMENT1) {
+		showExperimentObjects(false);
+	}
+	else if (g_activeExperiment == ExperimentType::EXPERIMENT2) {
+		showExperiment2Objects(false);
+	}
+}
+
+void activateExperimentMode(ExperimentType type)
+{
+	if (!ensureUserStudyLoaded()) return;
+	if (g_activeExperiment == type) return;
+
+	deactivateCurrentExperimentObjects();
+	showOriginalObjects(false);
+
+	if (type == ExperimentType::EXPERIMENT1) {
+		showExperimentObjects(true);
+		showExperiment2Objects(false);
+		experimentMode = true;
+		g_activeExperiment = ExperimentType::EXPERIMENT1;
+		updateSurfaceOrientation(userStudy->getCurrentDirection());
+		applySurfacePolarity(userStudy->getCurrentPolarity());
+		if (labelExperimentInstructions) labelExperimentInstructions->setEnabled(true);
+		if (labelTrialInfo) labelTrialInfo->setEnabled(true);
+		updateExperimentLabels();
+		std::cout << "====== EXPERIMENT 1 MODE ON ======\n";
+		std::cout << "Press 'T' to start the next trial, 'E' to exit, 'R' to switch to Experiment 2.\n";
+	}
+	else if (type == ExperimentType::EXPERIMENT2) {
+		showExperimentObjects(false);
+		g_exp2DebugMode = false;
+		showExperiment2Objects(true);
+		experimentMode = false;
+		g_activeExperiment = ExperimentType::EXPERIMENT2;
+		if (labelExperimentInstructions) labelExperimentInstructions->setEnabled(true);
+		if (labelTrialInfo) labelTrialInfo->setEnabled(true);
+	g_exp2UserAngleX = 0.0;
+	g_exp2UserAngleZ = 0.0;
+		g_exp2TargetAngleX = 0.0;
+		g_exp2TargetAngleZ = 0.0;
+		g_exp2ActiveTrialNumber = -1;
+		applyExp2TargetAngles();
+		applyExp2UserAngles();
+		flushPendingExp2Angles();
+		updateExperiment2Labels("Press 'T' to start Experiment 2.");
+		std::cout << "====== EXPERIMENT 2 MODE ON ======\n";
+		std::cout << "Press 'R' again to exit, 'E' to switch to Experiment 1.\n";
+	}
+}
+
+void exitExperimentMode()
+{
+	if (g_activeExperiment == ExperimentType::NONE) return;
+
+	g_exp2DebugMode = false;
+	deactivateCurrentExperimentObjects();
+	showOriginalObjects(true);
+	if (labelExperimentInstructions) labelExperimentInstructions->setEnabled(false);
+	if (labelTrialInfo) labelTrialInfo->setEnabled(false);
+	if (labelExp2Debug) labelExp2Debug->setEnabled(false);
+	g_activeExperiment = ExperimentType::NONE;
+	experimentMode = false;
+	std::cout << "====== EXPERIMENT MODE OFF ======\n";
+}
+
 
 //------------------------------------------------------------------------------
 // GENERAL SETTINGS
@@ -137,7 +453,7 @@ bool mirroredDisplay = false;
 // a file to store force
 std::ofstream csvFile;
 bool recordSensorDataToCSV = false;  // toggle if record sensor value
-static bool hasInitPress = false;
+bool hasInitPress = false;
 cVector3d presCurr;
 chai3d::cVector3d PressuretoArduino;
 int circleIndex = 0;
@@ -1067,6 +1383,29 @@ int main(int argc, char* argv[])
 	directionArrowHead->setEnabled(false);
 	world->addChild(directionArrowHead);
 
+	// Experiment 2 planes (visible/invisible)
+	g_exp2VisiblePlane = new cMesh();
+	world->addChild(g_exp2VisiblePlane);
+	cCreateBox(g_exp2VisiblePlane, kExp2PlaneHeight, kExp2PlaneThickness, kExp2PlaneWidth);
+	g_exp2VisiblePlane->setLocalPos(kExp2PlaneCenter);
+	g_exp2VisiblePlane->m_material->setRedDark();
+	g_exp2VisiblePlane->setUseDisplayList(true);
+	g_exp2VisiblePlane->setEnabled(false);
+
+	g_exp2HiddenPlane = new cMesh();
+	world->addChild(g_exp2HiddenPlane);
+	cCreateBox(g_exp2HiddenPlane, kExp2PlaneHeight, kExp2PlaneThickness, kExp2PlaneWidth);
+	g_exp2HiddenPlane->setLocalPos(kExp2PlaneCenter);
+	g_exp2HiddenPlane->m_material->setBlueRoyal();
+	g_exp2HiddenPlane->setUseDisplayList(true);
+	//g_exp2HiddenPlane->setShowTriangles(false);
+	//g_exp2HiddenPlane->setShowEdges(false);
+	g_exp2HiddenPlane->createAABBCollisionDetector(toolRadius);
+	g_exp2HiddenPlane->setUseTransparency(true);
+	g_exp2HiddenPlane->m_material->setTransparencyLevel(0);
+	g_exp2HiddenPlane->setEnabled(false);
+	g_exp2PlaneInitialized = true;
+
 
 	//--------------------------------------------------------------------------
 	// CREATE SHADERS
@@ -1324,6 +1663,59 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 			std::cout << "Record Sensor Data to CSV: " << recordSensorDataToCSV << std::endl;
 		}
 		}
+	else if (g_activeExperiment == ExperimentType::EXPERIMENT2 &&
+		(a_key == GLFW_KEY_UP || a_key == GLFW_KEY_DOWN ||
+			a_key == GLFW_KEY_LEFT || a_key == GLFW_KEY_RIGHT))
+	{
+		if (userStudy && userStudy->isExp2TrialActive()) {
+			if (a_key == GLFW_KEY_UP) {
+				g_exp2UserAngleX = clampAngleValue(g_exp2UserAngleX + kExp2AngleStepDeg, kExp2MinAngleDeg, kExp2MaxAngleDeg);
+			}
+			else if (a_key == GLFW_KEY_DOWN) {
+				g_exp2UserAngleX = clampAngleValue(g_exp2UserAngleX - kExp2AngleStepDeg, kExp2MinAngleDeg, kExp2MaxAngleDeg);
+			}
+			else if (a_key == GLFW_KEY_LEFT) {
+				g_exp2UserAngleZ = clampAngleValue(g_exp2UserAngleZ + kExp2AngleStepDeg, kExp2MinAngleDeg, kExp2MaxAngleDeg);
+			}
+			else if (a_key == GLFW_KEY_RIGHT) {
+				g_exp2UserAngleZ = clampAngleValue(g_exp2UserAngleZ - kExp2AngleStepDeg, kExp2MinAngleDeg, kExp2MaxAngleDeg);
+			}
+			applyExp2UserAngles();
+			updateExperiment2Labels();
+		}
+	}
+	else if (g_activeExperiment == ExperimentType::EXPERIMENT2 && a_key == GLFW_KEY_SPACE)
+	{
+		if (userStudy && userStudy->isExp2TrialActive()) {
+			double duration = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_exp2TrialStartTime).count();
+			userStudy->recordExp2UserAngles(g_exp2UserAngleX, g_exp2UserAngleZ, duration);
+			g_exp2ActiveTrialNumber = -1;
+			std::string msg = userStudy->isExp2BreakPending() ?
+				"Trial recorded. Break time! Press 'T' when ready." :
+				"Trial recorded. Press 'T' for the next trial.";
+			updateExperiment2Labels(msg);
+		}
+		else {
+			updateExperiment2Labels("No active trial. Press 'T' to start.");
+		}
+	}
+	else if (g_activeExperiment == ExperimentType::EXPERIMENT2 && a_key == GLFW_KEY_T)
+	{
+		if (userStudy && userStudy->isExp2TrialActive()) {
+			updateExperiment2Labels("Finish the current trial (press SPACE) before starting the next.");
+		}
+		else {
+			if (!startNextExp2Trial()) {
+				updateExperiment2Labels("No remaining trials.");
+			}
+		}
+	}
+	else if (g_activeExperiment == ExperimentType::EXPERIMENT2 && (a_key == GLFW_KEY_F6 || a_key == GLFW_KEY_Y))
+	{
+		g_exp2DebugMode = !g_exp2DebugMode;
+		showExperiment2Objects(true);
+		updateExperiment2Labels(g_exp2DebugMode ? "DEV MODE ON" : "DEV MODE OFF");
+	}
 	else if (a_key == GLFW_KEY_L)
 	{
 		// Mark the trajectory as started
@@ -1362,48 +1754,22 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 		// ??????????
 	else if (a_key == GLFW_KEY_E)
 	{
-		// ??????
-		experimentMode = !experimentMode;
-
-		if (experimentMode) {
-			// ??????
-			if (!userStudy) {
-				hasInitPress = false;
-				presCurr = ResolvedRateControl.m_initPressure;  // ?????
-				// ??????ID
-				std::cout << "\n=== ENTER USER ID ===\n";
-				std::cout << "Please enter user ID: ";
-				std::cin >> currentUserId;
-
-				userStudy = new UserStudyManager();
-				userStudy->loadOrCreateUserSession(currentUserId);
-				userStudy->initializeTrials();
-			}
-
-			// ??????,??????
-			showOriginalObjects(false);
-			showExperimentObjects(true);
-
-			// ????surface??(??Z??)
-			updateSurfaceOrientation(FeedbackDirection::VERTICAL_Z);
-			applySurfacePolarity(SurfacePolarity::POSITIVE);
-
-			updateExperimentLabels();
-
-			std::cout << "====== EXPERIMENT MODE ON ======" << std::endl;
-			std::cout << "Press 'T' to start next trial" << std::endl;
-			std::cout << "Press '1' for left surface stiffer, '2' for right surface stiffer" << std::endl;
-			std::cout << "Press 'E' again to exit experiment mode" << std::endl;
+		if (g_activeExperiment == ExperimentType::EXPERIMENT1) {
+			exitExperimentMode();
 		}
 		else {
-			// ??????
-			showExperimentObjects(false);
-			showOriginalObjects(true);
-
-			std::cout << "====== EXPERIMENT MODE OFF ======" << std::endl;
-			std::cout << "Back to characterization mode" << std::endl;
+			activateExperimentMode(ExperimentType::EXPERIMENT1);
 		}
+	}
+	else if (a_key == GLFW_KEY_R)
+	{
+		if (g_activeExperiment == ExperimentType::EXPERIMENT2) {
+			exitExperimentMode();
 		}
+		else {
+			activateExperimentMode(ExperimentType::EXPERIMENT2);
+		}
+	}
 	else if (a_key == GLFW_KEY_T && experimentMode)
 	{
 		if (userStudy) {
@@ -1909,6 +2275,10 @@ void close(void)
 		delete labelTrialInfo;
 		labelTrialInfo = nullptr;
 	}
+	if (labelExp2Debug) {
+		delete labelExp2Debug;
+		labelExp2Debug = nullptr;
+	}
 	// ??calibration??
 	if (sphereFinger) { delete sphereFinger; sphereFinger = nullptr; }
 	if (sphereActuator) { delete sphereActuator; sphereActuator = nullptr; }
@@ -2054,6 +2424,8 @@ void updateHaptics(void)
 
 		// signal frequency counter
 		freqCounterHaptics.signal(1);
+
+		processPendingExp2AnglesLocked();
 
 		// compute global reference frames for each object
 		world->computeGlobalPositions(true);
@@ -3179,6 +3551,13 @@ void printTransform(const cTransform& T, const std::string& name) {
 			<< R(2, r) << std::endl;
 	}
 }
+
+
+
+
+
+
+
 
 
 

@@ -103,6 +103,7 @@ public:
     double getExp2TargetAngleX() const;
     double getExp2TargetAngleZ() const;
     int getExp2CurrentTrialIndex() const { return m_exp2CurrentTrialIndex; }
+    int getExp2TotalTrials() const { return static_cast<int>(m_exp2Sequence.size()); }
     ExperimentState getExp2State() const { return m_exp2State; }
     bool isExp2TrialActive() const { return m_exp2TrialActive; }
     bool isExp2BreakPending() const { return m_exp2NeedBreak; }
