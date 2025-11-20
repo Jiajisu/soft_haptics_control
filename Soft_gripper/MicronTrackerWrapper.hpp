@@ -86,6 +86,9 @@ namespace mtw {
             calibDir_ = base + "/CalibrationFiles";
             markerDir_ = base + "/Markers";
 
+            // silence verbose SDK logging on stdout
+            mtCheck(MicronTrackerLogFileSet(false), "MicronTrackerLogFileSet");
+
             mtCheck(Cameras_AttachAvailableCameras(calibDir_.c_str()),
                 "Cameras_AttachAvailableCameras");
             if (Cameras_Count() < 1)

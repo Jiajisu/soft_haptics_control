@@ -1,4 +1,4 @@
-﻿
+
 //------------------------------------------------------------------------------
 // Arduino
 //------------------------------------------------------------------------------
@@ -32,41 +32,83 @@ using namespace std;
 #include "TimeUtil.hpp"
 #include "UserStudyManager.hpp"
 
-// 在现有全局变量声明后添加
+// ????????????
 //------------------------------------------------------------------------------
-// 表征实验对象
+// ??????
 //------------------------------------------------------------------------------
 cShapeLine* axisX = nullptr;
 cShapeLine* axisY = nullptr;
 cShapeLine* axisZ = nullptr;
 cShapeSphere* sphereTarget = nullptr;
 //------------------------------------------------------------------------------
-// 用户实验管理
+// ??????
 //------------------------------------------------------------------------------
 
 UserStudyManager* userStudy = nullptr;
-bool experimentMode = false;  // 切换实验模式的标志
+bool experimentMode = false;  // ?????????
 
-// 虚拟立方体用于刚度测试
+// ???????????
 cMesh* leftCube = nullptr;
 cMesh* rightCube = nullptr;
-bool isInteractingWithLeftCube = false;
-bool isInteractingWithRightCube = false;
-// 添加一个全局变量存储用户ID
-std::string currentUserId = "";
-//------------------------------------------------------------------------------
-// 场景管理变量
-//------------------------------------------------------------------------------
-// 保存原始对象的显示状态
-bool originalObjectsVisible = true;
-// 实验提示标签
-cLabel* labelExperimentInstructions = nullptr;
-cLabel* labelTrialInfo = nullptr;
-// 场景管理函数
-void showOriginalObjects(bool show);
-void showExperimentObjects(bool show);
+static cVector3d g_leftCubeBasePos(0.0, 0.0, 0.0);
+static cVector3d g_rightCubeBasePos(0.0, 0.0, 0.0);
+static bool g_cubeBaseInitialized = false;
+const double kSurfacePolarityOffset = 0.03;
+static FeedbackDirection g_activeSurfaceDirection = FeedbackDirection::VERTICAL_Z;
+cMesh* leftCubeHighlight = nullptr;
+cMesh* rightCubeHighlight = nullptr;
+const double kHighlightThickness = 0.0005;
+const double kHighlightLift = 0.0000001;
+const double kCubeFaceThickness = 0.004;
+const double kCubeFaceHalfThickness = kCubeFaceThickness * 0.5;
+const cColorf kHighlightColor(1.0f, 0.25f, 0.25f, 1.0f);
+cShapeLine* directionArrow = nullptr;
+const double kArrowLength = 0.01;
+cMesh* directionArrowHead = nullptr;
+const double kArrowHeadHeight = 0.003;
+const double kArrowHeadRadius = 0.0015;
 void updateExperimentLabels();
 void updateSurfaceOrientation(FeedbackDirection direction);
+void applySurfacePolarity(SurfacePolarity polarity);
+void rebuildHighlightMeshes(FeedbackDirection direction);
+// ????????????ID
+std::string currentUserId = "";
+//------------------------------------------------------------------------------
+// ??????
+//------------------------------------------------------------------------------
+// ???????????
+bool originalObjectsVisible = true;
+// ??????
+cLabel* labelExperimentInstructions = nullptr;
+cLabel* labelTrialInfo = nullptr;
+// ??????
+void showOriginalObjects(bool show);
+std::mutex           g_mtMtx;
+std::mutex           g_sceneMutex;
+std::atomic<bool>    g_mtRunning{ true };
+void showExperimentObjects(bool show)
+{
+	{
+		std::lock_guard<std::mutex> lock(g_sceneMutex);
+		// ??/???????
+		if (leftCube) leftCube->setEnabled(show);
+		if (rightCube) rightCube->setEnabled(show);
+		if (leftCubeHighlight) leftCubeHighlight->setEnabled(show);
+		if (rightCubeHighlight) rightCubeHighlight->setEnabled(show);
+		if (directionArrow) directionArrow->setEnabled(show);
+		if (directionArrowHead) directionArrowHead->setEnabled(show);
+
+		// ??/??????
+		if (labelExperimentInstructions) labelExperimentInstructions->setEnabled(show);
+		if (labelTrialInfo) labelTrialInfo->setEnabled(show);
+	}
+
+	if (show && userStudy) {
+		applySurfacePolarity(userStudy->getCurrentPolarity());
+	}
+}
+
+
 //------------------------------------------------------------------------------
 // GENERAL SETTINGS
 //------------------------------------------------------------------------------
@@ -110,11 +152,11 @@ cVector3d ZeroPressure(0, 0, 0);
 static mtw::MicronTracker MT;
 PNODATA makePNO_mm_colRM(const double pos_mm[3], const double Rcol[9]);
 void MTLoop();
-//std::thread mtThread;   // 全局，默认构造为空线程
+//std::thread mtThread;   // ??,????????
 cThread* mtThread = nullptr;
 static inline void mulRT(const double R[9], const double v[3], double o[3]);
 static inline void colToRow(const double C[9], double R[9]);
-//――――――― MicronTracker 线程共享数据 ―――――――
+//??????? MicronTracker ?????? ???????
 struct MTPoseSnapshot {
 	bool   haveFr = false;
 	bool   haveAct = false;
@@ -125,60 +167,58 @@ struct MTPoseSnapshot {
 	double  ts = 0.0;
 };
 MTPoseSnapshot       g_mtSnap;
-std::mutex           g_mtMtx;
-std::mutex           g_sceneMutex;
-std::atomic<bool>    g_mtRunning{ true };
 
-/// mm → m，并把 3×3 行主序矩阵转成 cMatrix3d
+
+/// mm ? m,?? 3�3 ??????? cMatrix3d
 inline void mtPose2Chai(const double pos_mm[3],
 	const double Rrow[9],
 	cVector3d& p_out,
 	cMatrix3d& R_out)
 {
-	constexpr double s = 0.001;           // mm → m
+	constexpr double s = 0.001;           // mm ? m
 	p_out.set(pos_mm[0] * s, pos_mm[1] * s, pos_mm[2] * s);
 
 	R_out.set(Rrow[0], Rrow[1], Rrow[2],
 		Rrow[3], Rrow[4], Rrow[5],
 		Rrow[6], Rrow[7], Rrow[8]);
 }
-static bool g_mtAvailable = false;           // ★ 新增
+static bool g_mtAvailable = false;           // ? ??
 
 
 
 //------------------------------------------------------------------------------
-// Calibration相关变量
+// Calibration????
 //------------------------------------------------------------------------------
 
-// 显示球体
-cShapeSphere* sphereFinger = nullptr;    // 绿色 - finger marker
-cShapeSphere* sphereActuator = nullptr;  // 红色 - actuator marker  
-cShapeSphere* sphereBot = nullptr;       // 蓝色 - 计算得到的bot
-cShapeSphere* sphereTop = nullptr;       // 黄色 - 计算得到的top
+// ????
+cShapeSphere* sphereFinger = nullptr;    // ?? - finger marker
+cShapeSphere* sphereActuator = nullptr;  // ?? - actuator marker  
+cShapeSphere* sphereBot = nullptr;       // ?? - ?????bot
+cShapeSphere* sphereTop = nullptr;       // ?? - ?????top
 
-// 显示控制标志
+// ??????
 bool g_showCalibrationSpheres = false;
 //------------------------------------------------------------------------------
-// 坐标变换函数声明
+// ????????
 //------------------------------------------------------------------------------
 cTransform transformCameraToBase(const double camPos[3], const double camRot[9]);
 bool getMTMarkerTransform(const std::string& markerName, cTransform& outTransform);
 
 //--------------------------------------------------------------
-//  Base Marker 参考系
+//  Base Marker ???
 //--------------------------------------------------------------
 //struct BaseReferenceFrame
 //{
-//	// base marker在相机坐标系下的位姿
-//	double basePos[3]{};     // 位置 (mm)
-//	double baseR[9]{};       // 旋转矩阵 (col-major)
+//	// base marker??????????
+//	double basePos[3]{};     // ?? (mm)
+//	double baseR[9]{};       // ???? (col-major)
 //
-//	// base到虚拟环境的变换（用户配置）
-//	double ve_offset[3]{ 0.0, 0.0, 0.0 };  // 平移偏移
-//	double ve_scale = 1.0;               // 缩放因子
+//	// base????????(????)
+//	double ve_offset[3]{ 0.0, 0.0, 0.0 };  // ????
+//	double ve_scale = 1.0;               // ????
 //
-//	    // base的逆变换（用于快速计算）
-//    double baseR_inv[9]{};   // R_base^T (用于转换到base坐标系)
+//	    // base????(??????)
+//    double baseR_inv[9]{};   // R_base^T (?????base???)
 //
 //	bool valid{ false };
 //} g_camera_T_base;
@@ -201,7 +241,7 @@ void matrixTranspose(const double M[9], double MT[9]) {
 	}
 }
 
-// 初始化base参考系
+// ???base???
 bool initBaseReference(mtw::MicronTracker& MT) {
 	std::cout << "[MT] ========================================" << std::endl;
 	std::cout << "[MT] Initializing BASE reference frame..." << std::endl;
@@ -219,7 +259,7 @@ bool initBaseReference(mtw::MicronTracker& MT) {
 		return false;
 	}
 
-	// 保存base位姿
+	// ??base??
 	cVector3d pos(
 		base.pos[0] * 0.001,
 		base.pos[1] * 0.001,
@@ -241,9 +281,9 @@ bool initBaseReference(mtw::MicronTracker& MT) {
 
 
 //------------------------------------------------------------------------------
-// Calibration相关变量
+// Calibration????
 //------------------------------------------------------------------------------
-// Calibration模式控制
+// Calibration????
 bool g_calibrationMode = false;
 enum CalibrationStep {
 	CALIB_NONE,
@@ -255,24 +295,24 @@ enum CalibrationStep {
 };
 CalibrationStep g_calibStep = CALIB_NONE;
 
-// 保存calibration时记录的位置和旋转
+// ??calibration?????????
 cVector3d g_calibFingerPos, g_calibBotPos, g_calibActuatorPos, g_calibTopPos;
 cMatrix3d g_calibFingerRot, g_calibBotRot, g_calibActuatorRot, g_calibTopRot;
 
-// 计算得到的变换矩阵
+// ?????????
 cMatrix3d g_T_finger_to_bot_rot;
 cVector3d g_T_finger_to_bot_pos;
 cMatrix3d g_T_actuator_to_top_rot;
 cVector3d g_T_actuator_to_top_pos;
 bool g_calibrationValid = false;
 
-// 显示calibration提示的标签
+// ??calibration?????
 cLabel* labelCalibrationStatus = nullptr;
 
-// 校准文件路径
+// ??????
 const std::string CALIBRATION_FILE = "rigid_body_calibration.txt";
 
-// 保存刚体变换到文件
+// ?????????
 bool saveCalibrationToFile() {
 	std::ofstream file(CALIBRATION_FILE);
 	if (!file.is_open()) {
@@ -280,7 +320,7 @@ bool saveCalibrationToFile() {
 		return false;
 	}
 
-	// 保存finger_to_bot变换
+	// ??finger_to_bot??
 	file << "# Finger to Bot Transform\n";
 	file << "finger_to_bot_pos "
 		<< g_T_finger_to_bot_pos.x() << " "
@@ -295,7 +335,7 @@ bool saveCalibrationToFile() {
 	}
 	file << "\n";
 
-	// 保存actuator_to_top变换
+	// ??actuator_to_top??
 	file << "# Actuator to Top Transform\n";
 	file << "actuator_to_top_pos "
 		<< g_T_actuator_to_top_pos.x() << " "
@@ -315,7 +355,7 @@ bool saveCalibrationToFile() {
 	return true;
 }
 
-// 从文件加载刚体变换
+// ?????????
 bool loadCalibrationFromFile() {
 	std::ifstream file(CALIBRATION_FILE);
 	if (!file.is_open()) {
@@ -371,24 +411,24 @@ bool loadCalibrationFromFile() {
 }
 
 //------------------------------------------------------------------------------
-// 新归零功能相关变量
+// ?????????
 //------------------------------------------------------------------------------
-bool g_zeroCalibrationMode = false;        // 是否在归零模式
-bool g_zeroCalibrationValid = false;       // 归零数据是否有效
-int g_zeroSnapCount = 0;                   // 已采集的snap数量
-const int ZERO_SNAP_SAMPLES = 10;          // 需要采集的snap数量
+bool g_zeroCalibrationMode = false;        // ???????
+bool g_zeroCalibrationValid = false;       // ????????
+int g_zeroSnapCount = 0;                   // ????snap??
+const int ZERO_SNAP_SAMPLES = 10;          // ?????snap??
 
-// 累积和用于计算平均值
-cVector3d g_zeroAccumPos(0, 0, 0);         // 位置累积和
+// ??????????
+cVector3d g_zeroAccumPos(0, 0, 0);         // ?????
 
-// 归零偏移量
-cVector3d g_zeroOffset(0, 0, 0);           // 计算得到的偏移量
-double g_h0 = 29.45 *0.001;                          // z方向的初始高度
+// ?????
+cVector3d g_zeroOffset(0, 0, 0);           // ????????
+double g_h0 = 29.45 *0.001;                          // z???????
 
-// 归零后的top在bot中的位置
-cVector3d g_top_in_bot_zeroed(0, 0, 0);    // 归零后的位置
+// ????top?bot????
+cVector3d g_top_in_bot_zeroed(0, 0, 0);    // ??????
 //--------------------------------------------------------------
-//  保存调零时抓到的基准
+//  ??????????
 //--------------------------------------------------------------
 
 cVector3d g_calibTopInBotRef;
@@ -505,7 +545,7 @@ void closeCSV();
 
 void printTransform(const cTransform& T, const std::string& name);
 
-std::string currentCsvType = "characterization"; // "characterization" 或 "experiment"
+std::string currentCsvType = "characterization"; // "characterization" ? "experiment"
 
 
 //==============================================================================
@@ -665,7 +705,8 @@ int main(int argc, char* argv[])
 	light->setEnabled(true);
 
 	// position the light source
-	light->setLocalPos(2, 1, 1.5);
+	light->setLocalPos(1, 1, 1.5);
+
 
 	// define the direction of the light beam
 	light->setDir(0, 0, 0);
@@ -678,7 +719,7 @@ int main(int argc, char* argv[])
 	light->m_shadowMap->setQualityVeryHigh();
 
 	// set light cone half angle
-	light->setCutOffAngleDeg(60);
+	light->setCutOffAngleDeg(180);
 
 
 	//--------------------------------------------------------------------------
@@ -716,8 +757,8 @@ int main(int argc, char* argv[])
 	// hide the device sphere. only show proxy.
 	tool->setShowContactPoints(true, false);
 
-	//tool->setShowFrame(true);        // 显示坐标轴
-	//tool->setFrameSize(0.02);        // 设置坐标轴长度为20mm
+	//tool->setShowFrame(true);        // ?????
+	//tool->setFrameSize(0.02);        // ????????20mm
 
 
 	// enable if objects in the scene are going to rotate of translate
@@ -882,7 +923,7 @@ int main(int argc, char* argv[])
 	// use display list to optimize graphic rendering performance
 	cone->setUseDisplayList(true);
 
-	// 改为：
+	// ??:
 	axisX = new cShapeLine(
 		cVector3d(0, 0, 0),
 		cVector3d(10, 0, 0)
@@ -906,24 +947,24 @@ int main(int argc, char* argv[])
 	world->addChild(axisZ);
 
 	//leftCube->setLocalPos( 0.02, -0.03, 0.04);
-	// 在现有对象创建代码后添加
+	// ????????????
 	// 
 /////////////////////////////////////////////////////////////////////////
 // CALIBRATION SPHERES
 /////////////////////////////////////////////////////////////////////////
 
-// 创建4个球体用于显示calibration
-	double calibSphereRadius = 0.003; // 3mm半径
+// ??4???????calibration
+	double calibSphereRadius = 0.003; // 3mm??
 
-	// Finger marker - 绿色
+	// Finger marker - ??
 	sphereFinger = new cShapeSphere(calibSphereRadius);
 	sphereFinger->m_material->setGreenForest();
-	sphereFinger->setEnabled(false); // 初始隐藏
+	sphereFinger->setEnabled(false); // ????
 	sphereFinger->setShowFrame(true);
-	sphereFinger->setFrameSize(0.015);  // 15mm长度
+	sphereFinger->setFrameSize(0.015);  // 15mm??
 	world->addChild(sphereFinger);
 
-	// Actuator marker - 红色
+	// Actuator marker - ??
 	sphereActuator = new cShapeSphere(calibSphereRadius);
 	sphereActuator->m_material->setRedCrimson();
 	sphereActuator->setEnabled(false);
@@ -931,7 +972,7 @@ int main(int argc, char* argv[])
 	sphereActuator->setFrameSize(0.015);
 	world->addChild(sphereActuator);
 
-	// Bot (计算得到) - 蓝色
+	// Bot (????) - ??
 	sphereBot = new cShapeSphere(calibSphereRadius);
 	sphereBot->m_material->setBlueRoyal();
 	sphereBot->setEnabled(false);
@@ -939,7 +980,7 @@ int main(int argc, char* argv[])
 	sphereActuator->setFrameSize(0.015);
 	world->addChild(sphereBot);
 
-	// Top (计算得到) - 黄色
+	// Top (????) - ??
 	sphereTop = new cShapeSphere(calibSphereRadius);
 	sphereTop->m_material->setYellow();
 	sphereTop->setEnabled(false);
@@ -949,31 +990,82 @@ int main(int argc, char* argv[])
 
 
 /////////////////////////////////////////////////////////////////////////
-// 实验用立方体 (左右两个)
+// ?????? (????)
 /////////////////////////////////////////////////////////////////////////
 
-// 左立方体 - 改为薄片
+// ???? - ????
 	leftCube = new cMesh();
 	world->addChild(leftCube);
-	// 根据方向创建不同朝向的薄片，初始为Z方向（水平面）
-	cCreateBox(leftCube, 0.03, 0.03, 0.001);  // 厚度只有1mm
+	// ?????????????,???Z??(???)
+	cCreateBox(leftCube, 0.03, 0.03, kCubeFaceThickness);
 	leftCube->setLocalPos( 0.04, -0.02, 0.05);
-	leftCube->m_material->setGrayLevel(0.7);
+	leftCube->m_material->setBlueRoyal();
 	leftCube->m_material->setStiffness(1000);
 	leftCube->createAABBCollisionDetector(toolRadius);
 	leftCube->setUseDisplayList(true);
 	leftCube->setEnabled(false);
+	if (!g_cubeBaseInitialized) {
+		g_leftCubeBasePos = leftCube->getLocalPos();
+	}
 
-	// 右立方体 - 改为薄片
+	// ???? - ????
 	rightCube = new cMesh();
 	world->addChild(rightCube);
-	cCreateBox(rightCube, 0.03, 0.03, 0.001);  // 厚度只有1mm
+	cCreateBox(rightCube, 0.03, 0.03, kCubeFaceThickness);
 	rightCube->setLocalPos( 0.04, 0.04, 0.05);
-	rightCube->m_material->setGrayLevel(0.7);
+	rightCube->m_material->setBlueRoyal();
 	rightCube->m_material->setStiffness(1200);
 	rightCube->createAABBCollisionDetector(toolRadius);
 	rightCube->setUseDisplayList(true);
 	rightCube->setEnabled(false);
+	if (!g_cubeBaseInitialized) {
+		g_rightCubeBasePos = rightCube->getLocalPos();
+		g_cubeBaseInitialized = true;
+	}
+
+	leftCubeHighlight = new cMesh();
+	cCreateBox(leftCubeHighlight, 0.03, 0.03, kHighlightThickness);
+	leftCubeHighlight->m_material->m_ambient = kHighlightColor;
+	leftCubeHighlight->m_material->m_diffuse = kHighlightColor;
+	leftCubeHighlight->setUseTransparency(false);
+	leftCubeHighlight->setEnabled(false);
+	world->addChild(leftCubeHighlight);
+
+	rightCubeHighlight = new cMesh();
+	cCreateBox(rightCubeHighlight, 0.03, 0.03, kHighlightThickness);
+	rightCubeHighlight->m_material->m_ambient = kHighlightColor;
+	rightCubeHighlight->m_material->m_diffuse = kHighlightColor;
+	rightCubeHighlight->setUseTransparency(false);
+	rightCubeHighlight->setEnabled(false);
+	world->addChild(rightCubeHighlight);
+
+	directionArrow = new cShapeLine(cVector3d(0, 0, 0), cVector3d(0, 0, kArrowLength));
+	directionArrow->m_colorPointA.setRed();
+	directionArrow->m_colorPointB.setRed();
+	directionArrow->setLineWidth(6);
+	directionArrow->setLocalPos(cVector3d(0.0, 0.0, 0.02));
+	directionArrow->setEnabled(false);
+	world->addChild(directionArrow);
+
+	cMatrix3d arrowHeadRot;
+	arrowHeadRot.identity();
+	directionArrowHead = new cMesh();
+	cCreateCone(directionArrowHead,
+		kArrowHeadRadius,
+		0.0,
+		kArrowHeadHeight,
+		20,
+		1,
+		1,
+		true,
+		true,
+		cVector3d(0, 0, 0),
+		arrowHeadRot);
+	directionArrowHead->m_material->m_ambient = kHighlightColor;
+	directionArrowHead->m_material->m_diffuse = kHighlightColor;
+	directionArrowHead->setUseTransparency(false);
+	directionArrowHead->setEnabled(false);
+	world->addChild(directionArrowHead);
 
 
 	//--------------------------------------------------------------------------
@@ -1011,15 +1103,15 @@ int main(int argc, char* argv[])
 	labelExperimentInstructions->m_fontColor.setBlack();
 	labelExperimentInstructions->setLocalPos(20, 50);
 	camera->m_frontLayer->addChild(labelExperimentInstructions);
-	labelExperimentInstructions->setEnabled(false); // 默认隐藏
+	labelExperimentInstructions->setEnabled(false); // ????
 
 	labelTrialInfo = new cLabel(font);
 	labelTrialInfo->m_fontColor.setBlue();
 	labelTrialInfo->setLocalPos(20, 150);
 	camera->m_frontLayer->addChild(labelTrialInfo);
-	labelTrialInfo->setEnabled(false); // 默认隐藏
+	labelTrialInfo->setEnabled(false); // ????
 
-	// 创建calibration状态标签
+	// ??calibration????
 	labelCalibrationStatus = new cLabel(font);
 	labelCalibrationStatus->m_fontColor.setRed();
 	labelCalibrationStatus->setLocalPos(20, height - 100);
@@ -1047,18 +1139,18 @@ int main(int argc, char* argv[])
 	// 1) Turn on micron tracker
 	//-------------------------------------------
 	try {
-		MT.init();                       // 保留原调用
-		g_mtAvailable = true;            // ★ 成功则置真
+		MT.init();                       // ?????
+		g_mtAvailable = true;            // ? ?????
 
-		// 使用CHAI3D线程框架，设置为中等优先级（低于haptic但高于普通线程）
+		// ??CHAI3D????,????????(??haptic???????)
 		mtThread = new cThread();
-		mtThread->start(MTLoop, CTHREAD_PRIORITY_HAPTICS); // 或使用 CTHREAD_PRIORITY_HAPTICS-1
+		mtThread->start(MTLoop, CTHREAD_PRIORITY_HAPTICS); // ??? CTHREAD_PRIORITY_HAPTICS-1
 
 		std::cout << "[MT] connected.\n";
 	}
 	catch (const std::exception& e) {
-		std::cerr << "[MT] not detected → run without MT (" << e.what() << ")\n";
-		g_mtRunning = false;             // 不启动采集线程
+		std::cerr << "[MT] not detected ? run without MT (" << e.what() << ")\n";
+		g_mtRunning = false;             // ???????
 	}
 	//MT.zero(28);
 	if (loadCalibrationFromFile()) {
@@ -1181,7 +1273,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 	else if (a_key == GLFW_KEY_O)
 	{
 		if (experimentMode) {
-			// 实验模式下不允许手动创建CSV，只显示状态信息
+			// ????????????CSV,???????
 			std::cout << "=== EXPERIMENT MODE - AUTO CSV MANAGEMENT ===" << std::endl;
 			if (userStudy) {
 				std::string csvFile = "user_" + currentUserId + "_experiment_data.csv";
@@ -1194,7 +1286,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 			}
 		}
 		else {
-			// 表征模式下保留原有的手动创建功能
+			// ????????????????
 			std::string csvFilename = "Cir_"
 				+ std::to_string(circleIndex)
 				+ "_"
@@ -1215,7 +1307,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 	else if (a_key == GLFW_KEY_W)
 	{
 		if (experimentMode) {
-			// 实验模式下不允许手动控制记录，只显示状态
+			// ??????????????,?????
 			std::cout << "=== EXPERIMENT MODE - AUTO RECORDING ===" << std::endl;
 			std::cout << "Recording is automatically managed during trials." << std::endl;
 			std::cout << "No manual recording control needed." << std::endl;
@@ -1227,7 +1319,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 			}
 		}
 		else {
-			// 表征模式下保留原有的手动记录功能
+			// ????????????????
 			recordSensorDataToCSV = !recordSensorDataToCSV;
 			std::cout << "Record Sensor Data to CSV: " << recordSensorDataToCSV << std::endl;
 		}
@@ -1267,18 +1359,18 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 			std::cout << "[Main] MT not available" << std::endl;
 		}
 }
-		// 在现有按键处理后添加
+		// ??????????
 	else if (a_key == GLFW_KEY_E)
 	{
-		// 切换实验模式
+		// ??????
 		experimentMode = !experimentMode;
 
 		if (experimentMode) {
-			// 进入实验模式
+			// ??????
 			if (!userStudy) {
 				hasInitPress = false;
-				presCurr = ResolvedRateControl.m_initPressure;  // 立即初始化
-				// 提示输入用户ID
+				presCurr = ResolvedRateControl.m_initPressure;  // ?????
+				// ??????ID
 				std::cout << "\n=== ENTER USER ID ===\n";
 				std::cout << "Please enter user ID: ";
 				std::cin >> currentUserId;
@@ -1288,12 +1380,13 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 				userStudy->initializeTrials();
 			}
 
-			// 隐藏原始对象，显示实验对象
+			// ??????,??????
 			showOriginalObjects(false);
 			showExperimentObjects(true);
 
-			// 设置初始surface朝向（默认Z方向）
+			// ????surface??(??Z??)
 			updateSurfaceOrientation(FeedbackDirection::VERTICAL_Z);
+			applySurfacePolarity(SurfacePolarity::POSITIVE);
 
 			updateExperimentLabels();
 
@@ -1303,7 +1396,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 			std::cout << "Press 'E' again to exit experiment mode" << std::endl;
 		}
 		else {
-			// 退出实验模式
+			// ??????
 			showExperimentObjects(false);
 			showOriginalObjects(true);
 
@@ -1314,7 +1407,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 	else if (a_key == GLFW_KEY_T && experimentMode)
 	{
 		if (userStudy) {
-			// 检查实验状态
+			// ??????
 			auto state = userStudy->getExperimentState();
 
 			if (state == ExperimentState::EXPERIMENT_COMPLETE) {
@@ -1327,19 +1420,20 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 				return;
 			}
 
-			// 开始新试次
+			// ?????
 			userStudy->startNextTrial();
 
-			// 更新surface朝向
+			// ??surface??
 			updateSurfaceOrientation(userStudy->getCurrentDirection());
+			applySurfacePolarity(userStudy->getCurrentPolarity());
 
-			// 更新显示
+			// ????
 			updateExperimentLabels();
 		}
 	}
-	else if (a_key == GLFW_KEY_B)  // 按键 'B' 触发归零
+	else if (a_key == GLFW_KEY_B)  // ?? 'B' ????
 	{
-		// 安全检查
+		// ????
 		if (!g_mtAvailable) {
 			std::cout << "[ERROR] MicronTracker not available!" << std::endl;
 			return;
@@ -1351,21 +1445,21 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 		}
 
 		if (!g_zeroCalibrationMode) {
-			// 开始归零采集
+			// ??????
 			std::cout << "\n[ZERO] ===== Starting Zero Calibration =====" << std::endl;
 			std::cout << "[ZERO] Keep markers stable, collecting "
 				<< ZERO_SNAP_SAMPLES << " samples..." << std::endl;
 			std::cout << "[ZERO] Target zero position: (0, 0, "
 				<< g_h0 * 1000 << ") mm" << std::endl;
 
-			// 重置采集变量
+			// ??????
 			g_zeroCalibrationMode = true;
 			g_zeroSnapCount = 0;
 			g_zeroAccumPos.set(0, 0, 0);
 
 		}
 		else {
-			// 取消归零采集
+			// ??????
 			std::cout << "[ZERO] Calibration cancelled by user" << std::endl;
 			g_zeroCalibrationMode = false;
 			g_zeroSnapCount = 0;
@@ -1375,12 +1469,12 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 	else if (a_key == GLFW_KEY_1 && experimentMode)
 	{
 		if (userStudy && userStudy->isTrialActive()) {
-			userStudy->recordUserChoice(0);  // 这里面已经打印了反应时间
+			userStudy->recordUserChoice(0);  // ????????????
 			updateExperimentLabels();
 
 			std::cout << "=== CHOICE RECORDED ===" << std::endl;
 			std::cout << "User choice: Left surface stiffer" << std::endl;
-			// 删除重复的反应时间打印，因为recordUserChoice已经打印了
+			// ???????????,??recordUserChoice?????
 
 			if (userStudy->hasNextTrial()) {
 				std::cout << "Press 'T' for next trial" << std::endl;
@@ -1397,12 +1491,12 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 	else if (a_key == GLFW_KEY_2 && experimentMode)
 	{
 		if (userStudy && userStudy->isTrialActive()) {
-			userStudy->recordUserChoice(1);  // 这里面已经打印了反应时间
+			userStudy->recordUserChoice(1);  // ????????????
 			updateExperimentLabels();
 
 			std::cout << "=== CHOICE RECORDED ===" << std::endl;
 			std::cout << "User choice: Right surface stiffer" << std::endl;
-			// 删除重复的反应时间打印，因为recordUserChoice已经打印了
+			// ???????????,??recordUserChoice?????
 
 			if (userStudy->hasNextTrial()) {
 				std::cout << "Press 'T' for next trial" << std::endl;
@@ -1415,9 +1509,9 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 			std::cout << "No active trial! Press 'T' to start a trial first." << std::endl;
 		}
 		}
-	// 在keyCallback函数中，现有的实验按键处理后添加：
+	// ?keyCallback???,????????????:
 
-// 手动设置实验组合的按键 (5-9, 0)
+// ??????????? (5-9, 0)
 	else if (a_key == GLFW_KEY_5 && experimentMode)
 	{
 		// Mode 1 (F-P), Direction 1 (X)
@@ -1425,6 +1519,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 			userStudy->setManualTrialGroup(InteractionMode::FORCE_TO_POSITION, FeedbackDirection::LATERAL_X);
 			userStudy->resetCurrentGroup();
 			updateSurfaceOrientation(FeedbackDirection::LATERAL_X);
+			applySurfacePolarity(SurfacePolarity::POSITIVE);
 			updateExperimentLabels();
 			std::cout << "=== MANUAL GROUP SET ===" << std::endl;
 			std::cout << "Mode: F-P, Direction: X (Lateral Left/Right)" << std::endl;
@@ -1438,6 +1533,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 			userStudy->setManualTrialGroup(InteractionMode::FORCE_TO_POSITION, FeedbackDirection::LATERAL_Y);
 			userStudy->resetCurrentGroup();
 			updateSurfaceOrientation(FeedbackDirection::LATERAL_Y);
+			applySurfacePolarity(SurfacePolarity::POSITIVE);
 			updateExperimentLabels();
 			std::cout << "=== MANUAL GROUP SET ===" << std::endl;
 			std::cout << "Mode: F-P, Direction: Y (Lateral Forward/Backward)" << std::endl;
@@ -1451,6 +1547,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 			userStudy->setManualTrialGroup(InteractionMode::FORCE_TO_POSITION, FeedbackDirection::VERTICAL_Z);
 			userStudy->resetCurrentGroup();
 			updateSurfaceOrientation(FeedbackDirection::VERTICAL_Z);
+			applySurfacePolarity(SurfacePolarity::POSITIVE);
 			updateExperimentLabels();
 			std::cout << "=== MANUAL GROUP SET ===" << std::endl;
 			std::cout << "Mode: F-P, Direction: Z (Vertical Up/Down)" << std::endl;
@@ -1464,6 +1561,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 			userStudy->setManualTrialGroup(InteractionMode::FORCE_TO_FORCE, FeedbackDirection::LATERAL_X);
 			userStudy->resetCurrentGroup();
 			updateSurfaceOrientation(FeedbackDirection::LATERAL_X);
+			applySurfacePolarity(SurfacePolarity::POSITIVE);
 			updateExperimentLabels();
 			std::cout << "=== MANUAL GROUP SET ===" << std::endl;
 			std::cout << "Mode: F-F, Direction: X (Lateral Left/Right)" << std::endl;
@@ -1477,6 +1575,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 			userStudy->setManualTrialGroup(InteractionMode::FORCE_TO_FORCE, FeedbackDirection::LATERAL_Y);
 			userStudy->resetCurrentGroup();
 			updateSurfaceOrientation(FeedbackDirection::LATERAL_Y);
+			applySurfacePolarity(SurfacePolarity::POSITIVE);
 			updateExperimentLabels();
 			std::cout << "=== MANUAL GROUP SET ===" << std::endl;
 			std::cout << "Mode: F-F, Direction: Y (Lateral Forward/Backward)" << std::endl;
@@ -1490,6 +1589,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 			userStudy->setManualTrialGroup(InteractionMode::FORCE_TO_FORCE, FeedbackDirection::VERTICAL_Z);
 			userStudy->resetCurrentGroup();
 			updateSurfaceOrientation(FeedbackDirection::VERTICAL_Z);
+			applySurfacePolarity(SurfacePolarity::POSITIVE);
 			updateExperimentLabels();
 			std::cout << "=== MANUAL GROUP SET ===" << std::endl;
 			std::cout << "Mode: F-F, Direction: Z (Vertical Up/Down)" << std::endl;
@@ -1498,7 +1598,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 		}
 	else if (a_key == GLFW_KEY_V)  // V for Verify calibration or Load/Save calibration
 	{
-		// 首先尝试加载校准文件
+		// ??????????
 		if (!g_calibrationValid) {
 			if (loadCalibrationFromFile()) {
 				std::cout << "[INFO] Rigid body transforms loaded from file" << std::endl;
@@ -1511,12 +1611,12 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 			}
 		}
 		else {
-			// 如果已有有效的校准数据，保存到文件并切换显示
+			// ???????????,??????????
 			if (saveCalibrationToFile()) {
 				std::cout << "[INFO] Rigid body transforms saved to file" << std::endl;
 			}
 
-			// 切换显示状态
+			// ??????
 			g_showCalibrationSpheres = !g_showCalibrationSpheres;
 
 			if (g_showCalibrationSpheres) {
@@ -1524,7 +1624,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 				std::cout << "  Green = Finger, Red = Actuator" << std::endl;
 				std::cout << "  Blue = Bot (calculated), Yellow = Top (calculated)" << std::endl;
 
-				// 添加：打开时设置显示坐标轴
+				// ??:??????????
 				if (sphereBot) {
 					sphereBot->setShowFrame(true);
 					sphereBot->setFrameSize(0.015);
@@ -1547,7 +1647,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 			}
 		}
 
-		// 更新球体显示状态
+		// ????????
 		if (sphereFinger) sphereFinger->setEnabled(g_showCalibrationSpheres);
 		if (sphereActuator) sphereActuator->setEnabled(g_showCalibrationSpheres);
 		if (sphereBot) sphereBot->setEnabled(g_showCalibrationSpheres);
@@ -1556,7 +1656,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 	else if (a_key == GLFW_KEY_Z)  // Z for Calibration mode
 	{
 		if (!g_calibrationMode) {
-			// 进入calibration模式
+			// ??calibration??
 			g_calibrationMode = true;
 			g_calibStep = CALIB_WAITING_FINGER;
 			g_calibrationValid = false;
@@ -1565,7 +1665,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 			std::cout << "Please position markers and press SPACE to record:" << std::endl;
 			std::cout << "1. Position FINGER marker and press SPACE" << std::endl;
 
-			// 显示所有球体以便观察
+			// ??????????
 			if (sphereFinger) sphereFinger->setEnabled(true);
 			if (sphereActuator) sphereActuator->setEnabled(true);
 			if (sphereBot) sphereBot->setEnabled(true);
@@ -1575,7 +1675,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 			labelCalibrationStatus->setText("Calibration: Position FINGER marker and press SPACE");
 		}
 		else {
-			// 退出calibration模式
+			// ??calibration??
 			g_calibrationMode = false;
 			g_calibStep = CALIB_NONE;
 			labelCalibrationStatus->setEnabled(false);
@@ -1591,9 +1691,9 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 		}
 	else if (a_key == GLFW_KEY_SPACE && g_calibrationMode)  // SPACE to record position
 	{
-		// 在calibration模式下记录当前位置
+		// ?calibration?????????
 		if (g_calibStep == CALIB_WAITING_FINGER) {
-			// 从MT读取finger marker的变换
+			// ?MT??finger marker???
 			cTransform T_finger;
 			if (getMTMarkerTransform("finger", T_finger)) {
 				g_calibFingerPos = T_finger.getLocalPos();
@@ -1603,7 +1703,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 				std::cout << "2. Place BOT marker at calibration position and press SPACE" << std::endl;
 				labelCalibrationStatus->setText("Calibration: Place BOT marker and press SPACE");
 
-				// 更新球体显示
+				// ??????
 				if (sphereFinger) {
 					sphereFinger->setLocalPos(g_calibFingerPos);
 					sphereFinger->setLocalRot(g_calibFingerRot);
@@ -1615,7 +1715,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 			}
 		}
 		else if (g_calibStep == CALIB_WAITING_BOT) {
-			// 从MT读取bot marker的变换
+			// ?MT??bot marker???
 			cTransform T_bot;
 			if (getMTMarkerTransform("bot", T_bot)) {
 				g_calibBotPos = T_bot.getLocalPos();
@@ -1625,7 +1725,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 				std::cout << "3. Position ACTUATOR marker and press SPACE" << std::endl;
 				labelCalibrationStatus->setText("Calibration: Position ACTUATOR marker and press SPACE");
 
-				// 更新球体显示
+				// ??????
 				if (sphereBot) {
 					sphereBot->setLocalPos(g_calibBotPos);
 					sphereBot->setLocalRot(g_calibBotRot);
@@ -1640,7 +1740,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 			}
 		}
 		else if (g_calibStep == CALIB_WAITING_ACTUATOR) {
-			// 从MT读取actuator marker的变换
+			// ?MT??actuator marker???
 			cTransform T_actuator;
 			if (getMTMarkerTransform("actuator", T_actuator)) {
 				g_calibActuatorPos = T_actuator.getLocalPos();
@@ -1650,7 +1750,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 				std::cout << "4. Place TOP marker at calibration position and press SPACE" << std::endl;
 				labelCalibrationStatus->setText("Calibration: Place TOP marker and press SPACE");
 
-				// 更新球体显示
+				// ??????
 				if (sphereActuator) {
 					sphereActuator->setLocalPos(g_calibActuatorPos);
 					sphereActuator->setLocalRot(g_calibActuatorRot);
@@ -1664,13 +1764,13 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 		else if (g_calibStep == CALIB_WAITING_TOP) {
 			std::cout << "[DEBUG] Attempting to read top marker in BASE frame..." << std::endl;
 
-			// 先检查sphereTop是否存在
+			// ???sphereTop????
 			if (!sphereTop) {
 				std::cerr << "[ERROR] sphereTop is null!" << std::endl;
 				return;
 			}
 
-			// 尝试读取top marker的变换
+			// ????top marker???
 			cTransform T_top;
 			if (getMTMarkerTransform("top", T_top)) {
 				g_calibTopPos = T_top.getLocalPos();
@@ -1678,24 +1778,24 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 
 				std::cout << "Top position recorded in BASE frame: " << (g_calibTopPos * 1000).str(3) << " mm" << std::endl;
 
-				// 更新球体显示
+				// ??????
 				sphereTop->setLocalPos(g_calibTopPos);
 				sphereTop->setLocalRot(g_calibTopRot);
 				sphereTop->setEnabled(true);
 				sphereTop->setShowFrame(true);
 				sphereTop->setFrameSize(0.015);
 
-				// 计算变换矩阵（全部在VE坐标系下）
+				// ??????(???VE????)
 				try {
-					// 使用cTransform计算相对变换
-					// finger_T_bot: bot在finger坐标系下的位姿
+					// ??cTransform??????
+					// finger_T_bot: bot?finger???????
 					cTransform world_T_finger(
 						g_calibFingerPos, g_calibFingerRot
 					);
 					cTransform world_T_bot(
 						g_calibBotPos, g_calibBotRot);
 
-					// 计算finger的逆变换
+					// ??finger????
 					cTransform finger_T_world(world_T_finger);
 					finger_T_world.invert();
 
@@ -1704,13 +1804,13 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 					g_T_finger_to_bot_pos = finger_T_bot.getLocalPos();
 					g_T_finger_to_bot_rot = finger_T_bot.getLocalRot();
 
-					// actuator_T_top: top在actuator坐标系下的位姿
+					// actuator_T_top: top?actuator???????
 					cTransform world_T_actuator(
 						g_calibActuatorPos, g_calibActuatorRot);
 					cTransform world_T_top(
 						g_calibTopPos, g_calibTopRot);
 
-					// 计算actuator的逆变换
+					// ??actuator????
 					cTransform actuator_T_world(world_T_actuator);
 					actuator_T_world.invert();
 
@@ -1719,7 +1819,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 					g_T_actuator_to_top_pos = actuator_T_top.getLocalPos();
 					g_T_actuator_to_top_rot = actuator_T_top.getLocalRot();
 
-					// 验证刚体约束
+					// ??????
 					cTransform T_bot_verify = world_T_finger * finger_T_bot;
 					cTransform T_top_verify = world_T_actuator * actuator_T_top;
 
@@ -1732,7 +1832,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 					std::cout << "[VALIDATION] Bot reconstruction error: " << botError << " mm (should be ~0)" << std::endl;
 					std::cout << "[VALIDATION] Top reconstruction error: " << topError << " mm (should be ~0)" << std::endl;
 
-					// 计算参考值 - 使用cTransform
+					// ????? - ??cTransform
 					cTransform T_bot_inv = world_T_bot;
 					T_bot_inv.invert();
 					cTransform T_top_in_bot = T_bot_inv * world_T_top;
@@ -1786,8 +1886,8 @@ void close(void)
 	g_mtRunning = false;
 	if (g_mtAvailable && mtThread != nullptr)
 	{
-		mtThread->stop();      // 使用CHAI3D线程的停止方法
-		delete mtThread;       // 释放线程对象
+		mtThread->stop();      // ??CHAI3D???????
+		delete mtThread;       // ??????
 		mtThread = nullptr;
 	}
 	if (axisX) { delete axisX; axisX = nullptr; }
@@ -1795,12 +1895,12 @@ void close(void)
 	if (axisZ) { delete axisZ; axisZ = nullptr; }
 	if (sphereTarget) { delete sphereTarget; sphereTarget = nullptr; }
 
-	// 在现有清理代码后添加
+	// ??????????
 	if (userStudy) {
 		delete userStudy;
 		userStudy = nullptr;
 	}
-	// 清理实验标签
+	// ??????
 	if (labelExperimentInstructions) {
 		delete labelExperimentInstructions;
 		labelExperimentInstructions = nullptr;
@@ -1809,7 +1909,7 @@ void close(void)
 		delete labelTrialInfo;
 		labelTrialInfo = nullptr;
 	}
-	// 清理calibration球体
+	// ??calibration??
 	if (sphereFinger) { delete sphereFinger; sphereFinger = nullptr; }
 	if (sphereActuator) { delete sphereActuator; sphereActuator = nullptr; }
 	if (sphereBot) { delete sphereBot; sphereBot = nullptr; }
@@ -1829,9 +1929,9 @@ void MTLoop()
 	{	
 		if (!g_mtAvailable) return;
 		if (!g_calibrationValid) continue;
-		if (!MT.update()) continue;           // 阻塞在 SDK FPS
+		if (!MT.update()) continue;           // ??? SDK FPS
 
-		MTPoseSnapshot snap;                  // 本地暂存
+		MTPoseSnapshot snap;                  // ????
 		snap.haveFr = MT.getPoseAndRotMat("finger", snap.fr);
 		snap.haveAct = MT.getPoseAndRotMat("actuator", snap.act);
 		snap.haveRel = (snap.haveFr && snap.haveAct &&
@@ -1839,7 +1939,7 @@ void MTLoop()
 			MT.getRelRotMat("actuator", "finger", snap.relR));
 		snap.ts = MT.getLastTimestamp();
 
-		// 复制到共享区
+		// ??????
 		{
 			std::lock_guard<std::mutex> lk(g_mtMtx);
 			g_mtSnap = snap;
@@ -1894,17 +1994,17 @@ void updateHaptics(void)
 	cMode state = IDLE;
 	cGenericObject* object = NULL;
 	cTransform tool_T_object;
-	// ★ 添加这三行声明
-	PNODATA pno_1{};           // 用于存储finger marker数据
-	PNODATA pno_2{};           // 用于存储actuator marker数据  
-	PNODATA sensor2CrctPNO{};  // 用于存储相对位姿数据
+	// ? ???????
+	PNODATA pno_1{};           // ????finger marker??
+	PNODATA pno_2{};           // ????actuator marker??  
+	PNODATA sensor2CrctPNO{};  // ??????????
 
-	// ========== 初始化部分（只执行一次）==========
+	// ========== ?????(?????)==========
 	static bool hapticsInitialized = false;
 	if (!hapticsInitialized) {
 
-		// 创建 sphereTarget
-		double sphereRadius = 0.0025; // 小球半径
+		// ?? sphereTarget
+		double sphereRadius = 0.0025; // ????
 		if (!sphereTarget) {
 			sphereTarget = new cShapeSphere(sphereRadius);
 			sphereTarget->m_material->setBlueCornflower();
@@ -1916,7 +2016,7 @@ void updateHaptics(void)
 		hapticsInitialized = true;
 	}
 
-	// ========== 以下是需要每次循环都执行的代码 ==========
+	// ========== ??????????????? ==========
 
 	// generate targets on circles
 	std::vector<TrajectoryGenerator::CircleDefinition> circles = {
@@ -1931,14 +2031,14 @@ void updateHaptics(void)
 
 	cVector3d startPos(0.0, 0.0, ResolvedRateControl.h_0 * 0.001);
 
-	// 定义一个"sensor2PosOffset"，用于让 sensor2 在无驱动时变成 (0,0,h_0)
+	// ????"sensor2PosOffset",??? sensor2 ??????? (0,0,h_0)
 	static cVector3d sensor2PosOffset(0.0, 0.0, 0.0);
 
 	chai3d::cVector3d PointOnCir = allCircles[circleIndex][pointIndex];
 
-	static const chai3d::cVector3d center(0.0, 0.0, ResolvedRateControl.h_0 * 0.001);   // 起始点
-	static const chai3d::cVector3d amp(0.002, 0.000, 0.00); // 幅值
-	double freq = 1;                      // 1 Hz 带宽测试
+	static const chai3d::cVector3d center(0.0, 0.0, ResolvedRateControl.h_0 * 0.001);   // ???
+	static const chai3d::cVector3d amp(0.002, 0.000, 0.00); // ??
+	double freq = 1;                      // 1 Hz ????
 
 	// simulation in now running
 	simulationRunning = true;
@@ -1997,15 +2097,15 @@ void updateHaptics(void)
 		//	duration
 		//);
 		//-----------------------------Gnerate a Sinewave traj---------------------------
-		 chai3d::cVector3d TrajTarget;          // ① 提前声明
-		 if (g_trajectoryStarted)               // ② 只有开始后才计算正弦
+		 chai3d::cVector3d TrajTarget;          // ? ????
+		 if (g_trajectoryStarted)               // ? ??????????
 		 {
 			 TrajTarget = TrajectoryGenerator::getSineWaveTrajectory(
-				 center, amp, freq, elapsedTime);  // 默认 11 周期
+				 center, amp, freq, elapsedTime);  // ?? 11 ??
 		 }
 		 else
 		 {
-			 TrajTarget = center;               // 未开始时保持在中心
+			 TrajTarget = center;               // ?????????
 		 }
 
 		//-----------------------------Gnerate On Circle traj---------------------------
@@ -2081,17 +2181,17 @@ void updateHaptics(void)
 		//}
 
 		////------------------------------------------------------------
-		//// 1) 读取 fr / Actuator 位姿，先检查返回值
+		//// 1) ?? fr / Actuator ??,??????
 		////------------------------------------------------------------
 		mtw::Pose fr, act;
-		//――――― 读取最新快照（非阻塞，仅拷贝一次）―――――
+		//????? ??????(???,?????)?????
 		MTPoseSnapshot snap;
 		if (g_mtAvailable) {
 			std::lock_guard<std::mutex> lk(g_mtMtx);
 			snap = g_mtSnap;
 		}
 		else {
-			snap.haveFr = false;   // ★ 无 MT 时后面直接跳过
+			snap.haveFr = false;   // ? ? MT ???????
 		}
 
 		static MTPoseSnapshot s_lastValidSnap;
@@ -2109,7 +2209,7 @@ void updateHaptics(void)
 		goto FINISH_HAPTIC_CYCLE;
 		}
 
-		// 把原本 okFr/okAct/relPos/relRot 的逻辑改成走 snap
+		// ??? okFr/okAct/relPos/relRot ?????? snap
 		fr = snap.fr;
 		act = snap.act;
 		double relPos[3];  double relRot[9];
@@ -2121,7 +2221,7 @@ void updateHaptics(void)
 		bool okAct = snap.haveAct;
 		bool okRel = snap.haveRel;
 
-		// 保存原始相机坐标（用于base转换）
+		// ????????(??base??)
 		double frCamPos[3] = { fr.pos[0], fr.pos[1], fr.pos[2] };
 		double frCamRot[9];
 		std::memcpy(frCamRot, fr.rot, 9 * sizeof(double));
@@ -2130,26 +2230,26 @@ void updateHaptics(void)
 		double actCamRot[9];
 		std::memcpy(actCamRot, act.rot, 9 * sizeof(double));
 
-		// 获取finger的变换
+		// ??finger???
 		cTransform T_finger_ve;
 		T_finger_ve = transformCameraToBase(frCamPos, frCamRot);
 
-		// 获取actuator的变换
+		// ??actuator???
 		cTransform T_actuator_ve;
 		T_actuator_ve = transformCameraToBase(actCamPos, actCamRot);
 
 
 		////------------------------------------------------------------
-		//// 6) 渲染
+		//// 6) ??
 		////------------------------------------------------------------
 
-		// 获取finger的位置和旋转用于渲染
+		// ??finger??????????
 		cVector3d posFrM = T_finger_ve.getLocalPos();
 		cMatrix3d rotFrM = T_finger_ve.getLocalRot();
 
-		// 更新显示对象
+		// ??????
 
-		// 更新tool位姿
+		// ??tool??
 		tool->setDeviceLocalPos(posFrM);
 		tool->setDeviceLocalRot(rotFrM);
 		tool->updateToolImagePosition();
@@ -2159,7 +2259,7 @@ void updateHaptics(void)
 
 		//	//------------------------------Closed loop ---------------------------------
 
-			cVector3d targetPos = TrajTarget * 1000;  // 目标位置 (mm)
+			cVector3d targetPos = TrajTarget * 1000;  // ???? (mm)
 			if (g_enableControl)
 			{
 				//std::cout << std::fixed << std::setprecision(2)
@@ -2174,8 +2274,8 @@ void updateHaptics(void)
 				//	continue;
 				//}
 				//std::cout << "   targetPos: " << targetPos << "   RELPos: " << sensor2CrctPNO.pos[0] << ", " << sensor2CrctPNO.pos[1] << ", " << sensor2CrctPNO.pos[2] << std::endl;
-				cVector3d newPos = result[0];       // 计算的新位置
-				cVector3d newPressure = result[1];  // 计算的新压力
+				cVector3d newPos = result[0];       // ??????
+				cVector3d newPressure = result[1];  // ??????
 				double error = (newPos - targetPos).length();
 				//std::cout << "Error: " << error << " = " << newPos << " - " << targetPos << std::endl;
 				//std::cout << "newpos " << newPos << std::endl;
@@ -2189,11 +2289,11 @@ void updateHaptics(void)
 			}
 		//	if (recordSensorDataToCSV)
 		//	{
-		//		// ① 取 MicronTracker 时间戳（秒）
-		//		double ts = MT.getLastTimestamp();   // 秒
-		//		// ② 拼装 CSV 行
+		//		// ? ? MicronTracker ???(?)
+		//		double ts = MT.getLastTimestamp();   // ?
+		//		// ? ?? CSV ?
 		//		std::vector<std::string> row;
-		//		row.emplace_back(std::to_string(ts));                // 时间戳
+		//		row.emplace_back(std::to_string(ts));                // ???
 		//		// -- fr --
 		//		row.emplace_back(std::to_string(pno_1.pos[0]));
 		//		row.emplace_back(std::to_string(pno_1.pos[1]));
@@ -2210,7 +2310,7 @@ void updateHaptics(void)
 		//		row.emplace_back(std::to_string(pno_2.ori[1]));
 		//		row.emplace_back(std::to_string(pno_2.ori[2]));
 		//		row.emplace_back(std::to_string(pno_2.ori[3]));
-		//		// -- Rel (Act → fr) --
+		//		// -- Rel (Act ? fr) --
 		//		row.emplace_back(std::to_string(sensor2CrctPNO.pos[0]));
 		//		row.emplace_back(std::to_string(sensor2CrctPNO.pos[1]));
 		//		row.emplace_back(std::to_string(sensor2CrctPNO.pos[2]));
@@ -2218,27 +2318,27 @@ void updateHaptics(void)
 		//		row.emplace_back(std::to_string(sensor2CrctPNO.ori[1]));
 		//		row.emplace_back(std::to_string(sensor2CrctPNO.ori[2]));
 		//		row.emplace_back(std::to_string(sensor2CrctPNO.ori[3]));
-		//		row.emplace_back(std::to_string(TrajTarget.x()));   // ★
-		//		row.emplace_back(std::to_string(TrajTarget.y()));   // ★
-		//		row.emplace_back(std::to_string(TrajTarget.z()));   // ★
-		//		// ③ 写入
+		//		row.emplace_back(std::to_string(TrajTarget.x()));   // ?
+		//		row.emplace_back(std::to_string(TrajTarget.y()));   // ?
+		//		row.emplace_back(std::to_string(TrajTarget.z()));   // ?
+		//		// ? ??
 		//		writeToCSV(row);
 		//	}
 
-		// ★ 将calibration验证代码放在这里 ★
-		// 在获取到snap数据之后，添加calibration验证代码
+		// ? ?calibration???????? ?
+		// ????snap????,??calibration????
 		if (g_showCalibrationSpheres && snap.haveFr && snap.haveAct) {
-			// 获取finger和actuator的原始位姿
-			mtw::Pose fingerPose = snap.fr;      // fr对应finger
-			mtw::Pose actuatorPose = snap.act;   // act对应actuator
+			// ??finger?actuator?????
+			mtw::Pose fingerPose = snap.fr;      // fr??finger
+			mtw::Pose actuatorPose = snap.act;   // act??actuator
 
-			// ★ 使用新的变换函数
+			// ? ????????
 			{
-				// 获取finger和actuator的完整变换（从相机到VE）
+				// ??finger?actuator?????(????VE)
 				cTransform T_finger_ve = transformCameraToBase(fingerPose.pos, fingerPose.rot);
 				cTransform T_actuator_ve = transformCameraToBase(actuatorPose.pos, actuatorPose.rot);
 
-				// 更新直接追踪到的marker位置（绿色和红色球）
+				// ????????marker??(??????)
 				if (sphereFinger) {
 					sphereFinger->setLocalPos(T_finger_ve.getLocalPos());
 					sphereFinger->setLocalRot(T_finger_ve.getLocalRot());
@@ -2248,19 +2348,19 @@ void updateHaptics(void)
 					sphereActuator->setLocalRot(T_actuator_ve.getLocalRot());
 				}
 
-				// ★ 使用calibration数据计算bot和top位置
+				// ? ??calibration????bot?top??
 				if (g_calibrationValid) {
-					// 构建finger到bot的变换
+					// ??finger?bot???
 					cTransform T_finger_to_bot;
 					T_finger_to_bot.setLocalPos(g_T_finger_to_bot_pos);
 					T_finger_to_bot.setLocalRot(g_T_finger_to_bot_rot);
 
-					// 构建actuator到top的变换
+					// ??actuator?top???
 					cTransform T_actuator_to_top;
 					T_actuator_to_top.setLocalPos(g_T_actuator_to_top_pos);
 					T_actuator_to_top.setLocalRot(g_T_actuator_to_top_rot);
 
-					// 计算bot和top的世界位置
+					// ??bot?top?????
 					cTransform world_T_bot = T_finger_ve * T_finger_to_bot;
 					cTransform world_T_top = T_actuator_ve * T_actuator_to_top;
 
@@ -2274,67 +2374,67 @@ void updateHaptics(void)
 						sphereTop->setLocalRot(world_T_top.getLocalRot());
 					}
 					
-					// ★ 计算top在bot坐标系中的原始位置 ★
+					// ? ??top?bot????????? ?
 					cTransform bot_T_world(world_T_bot);
 					bot_T_world.invert();
 					cTransform bot_T_top = bot_T_world * world_T_top;
 					cVector3d top_in_bot_raw = bot_T_top.getLocalPos();
 
-					// ★ 新归零功能：采集数据 ★
+					// ? ?????:???? ?
 					if (g_zeroCalibrationMode) {
 						if (g_zeroSnapCount < ZERO_SNAP_SAMPLES) {
-							// 累积位置数据
+							// ??????
 							g_zeroAccumPos += top_in_bot_raw;
 							g_zeroSnapCount++;
 							std::cout << "[ZERO] Sample " << g_zeroSnapCount << "/" << ZERO_SNAP_SAMPLES
 								<< ": " << (top_in_bot_raw).str(3) << " mm" << std::endl;
-							// 如果采集完成，计算平均值和偏移
+							// ??????,????????
 							if (g_zeroSnapCount >= ZERO_SNAP_SAMPLES) {
-								// 计算平均位置
+								// ??????
 								cVector3d avgPos = -g_zeroAccumPos / (double)ZERO_SNAP_SAMPLES;
-								// 计算偏移量：使归零后的位置为 (0, 0, h0)
+								// ?????:???????? (0, 0, h0)
 								g_zeroOffset.set(avgPos.x(), avgPos.y(), -g_h0 + avgPos.z());
-								// 标记归零完成
+								// ??????
 								g_zeroCalibrationValid = true;
 								g_zeroCalibrationMode = false;
 							}
 						}
 					}
 
-					// ★ 应用归零偏移 ★
+					// ? ?????? ?
 					if (g_zeroCalibrationValid) {
-						// 应用偏移得到归零后的位置
+						// ????????????
 						g_top_in_bot_zeroed = top_in_bot_raw + g_zeroOffset;
 
-						// ★ 新增：z轴取反，转换为毫米，保留1位小数 ★
+						// ? ??:z???,?????,??1??? ?
 						cVector3d g_top_in_bot_processed;
 						g_top_in_bot_processed.set(
-							g_top_in_bot_zeroed.x() * 1000.0,  // x轴转毫米
-							g_top_in_bot_zeroed.y() * 1000.0,  // y轴转毫米
-							-g_top_in_bot_zeroed.z() * 1000.0  // z轴取反并转毫米
+							g_top_in_bot_zeroed.x() * 1000.0,  // x????
+							g_top_in_bot_zeroed.y() * 1000.0,  // y????
+							-g_top_in_bot_zeroed.z() * 1000.0  // z???????
 						);
 
-						// 保留1位小数
+						// ??1???
 						double x_mm = std::round(g_top_in_bot_processed.x() * 10.0) / 10.0;
 						double y_mm = std::round(g_top_in_bot_processed.y() * 10.0) / 10.0;
 						double z_mm = std::round(g_top_in_bot_processed.z() * 10.0) / 10.0;
 
-						// 更新处理后的值
+						// ???????
 						g_top_in_bot_processed.set(x_mm, y_mm, z_mm);
 
-						// 减少打印频率，避免刷屏
+						// ??????,????
 						static int printCounter = 0;
-						if (++printCounter % 200 == 0) {  // 每200帧打印一次
+						if (++printCounter % 200 == 0) {  // ?200?????
 							std::cout << " X: " << x_mm << ", "
 								<< "Y: " << y_mm << ", "
 								<< "Z: " << z_mm << ", " << "\r ";
 						}
 
-						// ★ 如果需要在其他地方使用处理后的值，可以将其存储在全局变量中 ★
-						// 需要在文件开头添加全局变量声明：
-						// cVector3d g_top_in_bot_final;  // 最终处理后的位置（毫米，z轴取反，1位小数）
+						// ? ????????????????,???????????? ?
+						// ???????????????:
+						// cVector3d g_top_in_bot_final;  // ????????(??,z???,1???)
 						// 
-						// 然后在这里赋值：
+						// ???????:
 						// g_top_in_bot_final = g_top_in_bot_processed;
 					}
 
@@ -2344,25 +2444,25 @@ void updateHaptics(void)
 		}
 
 		/////////////////////////////////////////////////////////////////////////
-		// 实验模式处理
+		// ??????
 		/////////////////////////////////////////////////////////////////////////
 if (experimentMode && userStudy && userStudy->isTrialActive()) {
-	// 显示立方体
+	// ?????
 	leftCube->setEnabled(true);
 	rightCube->setEnabled(true);
 
-	// 如果还没初始化，也要初始化
+	// ???????,?????
 	if (!hasInitPress) {
 		presCurr = ResolvedRateControl.m_initPressure;
 		hasInitPress = true;
 		std::cout << "[EXP] Initial pressure set to: " << presCurr.str() << std::endl;
 	}
 
-	// 根据当前试次设置刚度
+	// ??????????
 	double refStiffness = userStudy->getCurrentReferenceStiffness();
 	double compStiffness = userStudy->getCurrentComparisonStiffness();
 
-	// 随机分配左右位置
+	// ????????
 	static bool leftIsReference = (rand() % 2 == 0);
 	if (leftIsReference) {
 		leftCube->m_material->setStiffness(refStiffness);
@@ -2372,32 +2472,6 @@ if (experimentMode && userStudy && userStudy->isTrialActive()) {
 		leftCube->m_material->setStiffness(compStiffness);
 		rightCube->m_material->setStiffness(refStiffness);
 	}
-
-	// 检测立方体交互
-	bool currentlyTouchingLeft = false;
-	bool currentlyTouchingRight = false;
-
-	if (tool->m_hapticPoint->getNumCollisionEvents() > 0) {
-		cCollisionEvent* event = tool->m_hapticPoint->getCollisionEvent(0);
-		if (event->m_object == leftCube) {
-			currentlyTouchingLeft = true;
-			if (!isInteractingWithLeftCube) {
-				userStudy->recordTouch(true);
-				isInteractingWithLeftCube = true;
-			}
-		}
-		else if (event->m_object == rightCube) {
-			currentlyTouchingRight = true;
-			if (!isInteractingWithRightCube) {
-				userStudy->recordTouch(false);
-				isInteractingWithRightCube = true;
-			}
-		}
-	}
-
-	// 更新交互状态
-	if (!currentlyTouchingLeft) isInteractingWithLeftCube = false;
-	if (!currentlyTouchingRight) isInteractingWithRightCube = false;
 
 	/////////////////////////////////////////////////////////////////////////
 	// FORCE - DISPLACEMENT 
@@ -2455,19 +2529,19 @@ if (experimentMode && userStudy && userStudy->isTrialActive()) {
 
 }
 else if (!experimentMode) {
-	// 非实验模式时隐藏立方体
+	// ???????????
 	if (leftCube) leftCube->setEnabled(false);
 	if (rightCube) rightCube->setEnabled(false);
 
 	/////////////////////////////////////////////////////////////////////////
-	// 表征模式：保持原有的轨迹跟踪控制
+	// ????:???????????
 	/////////////////////////////////////////////////////////////////////////
 	if (!hasInitPress) {
 		presCurr = ResolvedRateControl.m_initPressure;
 		hasInitPress = true;
 	}
 
-	cVector3d targetPos = TrajTarget * 1000; // 目标轨迹位置
+	cVector3d targetPos = TrajTarget * 1000; // ??????
 	auto result = ResolvedRateControl.updateMotion(presCurr, targetPos);
 	chai3d::cVector3d newPos = result[0];
 	chai3d::cVector3d newPressure = result[1];
@@ -2556,7 +2630,7 @@ else if (!experimentMode) {
 		// FINALIZE
 		/////////////////////////////////////////////////////////////////////////
 	FINISH_HAPTIC_CYCLE:
-		;   // 空语句占位
+		;   // ?????
 		// send forces to haptic device
 		// tool->applyToDevice();  
 	}
@@ -2658,14 +2732,14 @@ void openCSV(const std::string& filename)
 		std::cerr << "Unable to open file\n";
 		return;
 	}
-	// 只在文件为空时写表头
+	// ??????????
 	if (csvFile.tellp() == 0) {
 		csvFile
-			<< "TimeStamp,"                             // ★修改：统一叫 TimeStamp
+			<< "TimeStamp,"                             // ???:??? TimeStamp
 			<< "fr_posX,fr_posY,fr_posZ,fr_oriW,fr_oriX,fr_oriY,fr_oriZ,"
 			<< "act_posX,act_posY,act_posZ,act_oriW,act_oriX,act_oriY,act_oriZ,"
 			<< "rel_posX,rel_posY,rel_posZ,rel_oriW,rel_oriX,rel_oriY,rel_oriZ,"
-			<< "cmd_X,cmd_Y,cmd_Z"                      // ★新增
+			<< "cmd_X,cmd_Y,cmd_Z"                      // ???
 			<< '\n';
 		csvFile.flush();
 	}
@@ -2698,16 +2772,16 @@ void closeCSV() {
 
 
 
-// 将列主序( OpenGL-style )矩阵转成本函数需要的 row-major
+// ????( OpenGL-style )?????????? row-major
 static inline void colToRow(const double C[9], double R[9])
 {
-	// C[i*3 + j]  =  行 j, 列 i
+	// C[i*3 + j]  =  ? j, ? i
 	R[0] = C[0];  R[1] = C[3];  R[2] = C[6];
 	R[3] = C[1];  R[4] = C[4];  R[5] = C[7];
 	R[6] = C[2];  R[7] = C[5];  R[8] = C[8];
 }
 
-// --- 行向量乘 R^T -------------------------------------------------------------
+// --- ???? R^T -------------------------------------------------------------
 static inline void mulRT(const double R[9], const double v[3], double o[3])
 {
 	o[0] = R[0] * v[0] + R[3] * v[1] + R[6] * v[2];
@@ -2718,9 +2792,9 @@ static inline void mulRT(const double R[9], const double v[3], double o[3])
 PNODATA makePNO_mm_colRM(const double pos_mm[3],
 	const double Rcol[9])
 {
-	PNODATA out{};   // 全字段零初始化
+	PNODATA out{};   // ???????
 
-	///* -------- 1) 位置：mm → cm（SDK 默认 POS_CM） -------- */
+	///* -------- 1) ??:mm ? cm(SDK ?? POS_CM) -------- */
 	//constexpr double kMM2CM = 1;
 	out.pos[0] = pos_mm[0];
 	out.pos[1] = pos_mm[1];
@@ -2732,8 +2806,8 @@ PNODATA makePNO_mm_colRM(const double pos_mm[3],
 	//	<< out.pos[2] << ") mm   \r ";
 
 
-	/* -------- 2) 旋转矩阵 → 四元数 (w,x,y,z) --------
-	   将列主序转为行主序元素便于公式书写                         */
+	/* -------- 2) ???? ? ??? (w,x,y,z) --------
+	   ?????????????????                         */
 	const double m00 = Rcol[0], m01 = Rcol[3], m02 = Rcol[6];
 	const double m10 = Rcol[1], m11 = Rcol[4], m12 = Rcol[7];
 	const double m20 = Rcol[2], m21 = Rcol[5], m22 = Rcol[8];
@@ -2770,7 +2844,7 @@ PNODATA makePNO_mm_colRM(const double pos_mm[3],
 		qz = 0.25 * s;
 	}
 
-	/* 归一化（数值安全） */
+	/* ???(????) */
 	double norm = std::sqrt(qw * qw + qx * qx + qy * qy + qz * qz);
 	qw /= norm;  qx /= norm;  qy /= norm;  qz /= norm;
 
@@ -2784,49 +2858,46 @@ PNODATA makePNO_mm_colRM(const double pos_mm[3],
 }
 
 //------------------------------------------------------------------------------
-// 场景管理函数
+// ??????
 //------------------------------------------------------------------------------
 
 void showOriginalObjects(bool show)
 {
 	std::lock_guard<std::mutex> lock(g_sceneMutex);
-	// 隐藏/显示原始对象
+	// ??/??????
 	if (base) base->setEnabled(show);
 	if (box) box->setEnabled(show);
 	if (sphere) sphere->setEnabled(show);
 	if (cone) cone->setEnabled(show);
 
-	// 隐藏/显示表征实验专用对象
+	// ??/??????????
 	if (axisX) axisX->setEnabled(show);
 	if (axisY) axisY->setEnabled(show);
 	if (axisZ) axisZ->setEnabled(show);
 	if (sphereTarget) sphereTarget->setEnabled(show);
 
-	// cylinderTop 没有添加到world，所以不需要处理
-}
-
-void showExperimentObjects(bool show)
-{
-	std::lock_guard<std::mutex> lock(g_sceneMutex);
-	// 显示/隐藏实验立方体
-	if (leftCube) leftCube->setEnabled(show);
-	if (rightCube) rightCube->setEnabled(show);
-
-	// 显示/隐藏实验标签
-	if (labelExperimentInstructions) labelExperimentInstructions->setEnabled(show);
-	if (labelTrialInfo) labelTrialInfo->setEnabled(show);
+	// cylinderTop ?????world,???????
 }
 
 void updateExperimentLabels()
 {
 	if (!userStudy || !experimentMode) return;
 
-	// 更新指令标签
+	std::string dirStr;
+	switch (userStudy->getCurrentDirection()) {
+	case FeedbackDirection::LATERAL_X: dirStr = "X (Left/Right)"; break;
+	case FeedbackDirection::LATERAL_Y: dirStr = "Y (Forward/Backward)"; break;
+	case FeedbackDirection::VERTICAL_Z: dirStr = "Z (Up/Down)"; break;
+	}
+	SurfacePolarity pol = userStudy->getCurrentPolarity();
+	std::string polStr = (pol == SurfacePolarity::POSITIVE) ? "+ axis" : "- axis";
+
+	// ??????
 	if (labelExperimentInstructions) {
 		std::string instructions = "STIFFNESS DISCRIMINATION EXPERIMENT\n";
 		instructions += "Data automatically saved to: user_" + currentUserId + "_experiment_data.csv\n\n";
 
-		// 根据实验状态显示不同信息
+		// ????????????
 		switch (userStudy->getExperimentState()) {
 		case ExperimentState::NOT_STARTED:
 			instructions += "Loading experiment...\n";
@@ -2839,7 +2910,7 @@ void updateExperimentLabels()
 
 		case ExperimentState::IN_PROGRESS:
 			instructions += "Trial in progress\n";
-			instructions += "Touch both surfaces and decide which is stiffer\n";
+			instructions += "Touch only the red-highlighted face indicated by the central arrow (" + polStr + ", along " + dirStr + ")\n";
 			instructions += "Press '1' for LEFT surface stiffer, '2' for RIGHT surface stiffer\n";
 			break;
 
@@ -2860,18 +2931,20 @@ void updateExperimentLabels()
 			break;
 		}
 
+		instructions += "\nSurface orientation: " + polStr + " (follow the central arrow)\n";
+		instructions += "Contact only the red-highlighted surface shifted along " + dirStr + "\n";
 		instructions += "\nManual Mode: Press 5-9,0 to jump to specific groups";
 		instructions += "\nPress 'E' to exit experiment mode";
 
 		labelExperimentInstructions->setText(instructions);
 
-		// 居中显示
+		// ????
 		int labelWidth = labelExperimentInstructions->getWidth();
 		int centerX = (width - labelWidth) / 2;
 		labelExperimentInstructions->setLocalPos(centerX, height - 200);
 	}
 
-	// 更新试次信息标签
+	// ????????
 	if (labelTrialInfo && userStudy->hasNextTrial()) {
 		int trialInGroup = userStudy->getCurrentTrialInGroup();
 		int groupNum = userStudy->getCurrentTrialGroup() + 1;
@@ -2880,14 +2953,8 @@ void updateExperimentLabels()
 		trialInfo += "Trial: " + std::to_string(trialInGroup) + "/110\n";
 
 		std::string modeStr = (userStudy->getCurrentMode() == InteractionMode::FORCE_TO_POSITION) ? "F-P" : "F-F";
-		std::string dirStr;
-		switch (userStudy->getCurrentDirection()) {
-		case FeedbackDirection::LATERAL_X: dirStr = "X (Left/Right)"; break;
-		case FeedbackDirection::LATERAL_Y: dirStr = "Y (Forward/Backward)"; break;
-		case FeedbackDirection::VERTICAL_Z: dirStr = "Z (Up/Down)"; break;
-		}
 
-		trialInfo += "Mode: " + modeStr + " | Direction: " + dirStr;
+		trialInfo += "Mode: " + modeStr + " | Direction: " + dirStr + " | Surface: " + polStr + " (arrow)";
 
 		labelTrialInfo->setText(trialInfo);
 		labelTrialInfo->m_fontColor.setBlack();
@@ -2897,44 +2964,166 @@ void updateExperimentLabels()
 		labelTrialInfo->setLocalPos(centerX, 80);
 	}
 }
-// 在文件末尾实现这个函数
+// ???????????
+namespace {
+void rebuildHighlightMesh(cMesh* mesh, FeedbackDirection direction)
+{
+	if (!mesh) return;
+	mesh->clear();
+	switch (direction) {
+		case FeedbackDirection::LATERAL_X:
+			cCreateBox(mesh, kHighlightThickness, 0.03, 0.03);
+			break;
+		case FeedbackDirection::LATERAL_Y:
+			cCreateBox(mesh, 0.03, kHighlightThickness, 0.03);
+			break;
+	case FeedbackDirection::VERTICAL_Z:
+	default:
+		cCreateBox(mesh, 0.03, 0.03, kHighlightThickness);
+		break;
+	}
+	mesh->m_material->m_ambient = kHighlightColor;
+	mesh->m_material->m_diffuse = kHighlightColor;
+	mesh->setUseTransparency(false);
+}
+
+cMatrix3d computeArrowRotation(const cVector3d& direction)
+{
+	cMatrix3d rot;
+	rot.identity();
+	cVector3d dir = direction;
+	double len = dir.length();
+	if (len < 1e-9) {
+		return rot;
+	}
+	dir /= len;
+	const cVector3d base(0.0, 0.0, 1.0);
+	double dot = cClamp(base.dot(dir), -1.0, 1.0);
+	double angle = acos(dot);
+	if (angle < 1e-6) {
+		return rot;
+	}
+	cVector3d axis;
+	cCross(axis, base);
+	if (axis.lengthsq() < 1e-9) {
+		axis = cVector3d(1.0, 0.0, 0.0);
+	}
+	axis.normalize();
+	rot.setAxisAngleRotationRad(axis, angle);
+	return rot;
+}
+}
+
+void rebuildHighlightMeshes(FeedbackDirection direction)
+{
+	rebuildHighlightMesh(leftCubeHighlight, direction);
+	rebuildHighlightMesh(rightCubeHighlight, direction);
+}
+
 void updateSurfaceOrientation(FeedbackDirection direction)
 {
 	std::lock_guard<std::mutex> lock(g_sceneMutex);
 	if (!leftCube || !rightCube) return;
 
-	// 清除现有的几何体
+	g_activeSurfaceDirection = direction;
+
+	// ????????
 	leftCube->clear();
 	rightCube->clear();
 
-	// 根据方向创建不同朝向的薄片
+	// ?????????????
 	switch (direction) {
 	case FeedbackDirection::LATERAL_X:
-		// X方向 - 垂直面，法线沿X轴
-		cCreateBox(leftCube, 0.001, 0.03, 0.03);
-		cCreateBox(rightCube, 0.001, 0.03, 0.03);
+		// X?? - ???,???X?
+		cCreateBox(leftCube, kCubeFaceThickness, 0.03, 0.03);
+		cCreateBox(rightCube, kCubeFaceThickness, 0.03, 0.03);
 		break;
 
 	case FeedbackDirection::LATERAL_Y:
-		// Y方向 - 垂直面，法线沿Y轴
-		cCreateBox(leftCube, 0.03, 0.001, 0.03);
-		cCreateBox(rightCube, 0.03, 0.001, 0.03);
+		// Y?? - ???,???Y?
+		cCreateBox(leftCube, 0.03, kCubeFaceThickness, 0.03);
+		cCreateBox(rightCube, 0.03, kCubeFaceThickness, 0.03);
 		break;
 
 	case FeedbackDirection::VERTICAL_Z:
-		// Z方向 - 水平面，法线沿Z轴
-		cCreateBox(leftCube, 0.03, 0.03, 0.001);
-		cCreateBox(rightCube, 0.03, 0.03, 0.001);
+		// Z?? - ???,???Z?
+		cCreateBox(leftCube, 0.03, 0.03, kCubeFaceThickness);
+		cCreateBox(rightCube, 0.03, 0.03, kCubeFaceThickness);
 		break;
 	}
 
-	// 重新创建碰撞检测
+	// ????????
 	leftCube->createAABBCollisionDetector(0.002);
 	rightCube->createAABBCollisionDetector(0.002);
+
+	rebuildHighlightMeshes(direction);
+}
+
+void applySurfacePolarity(SurfacePolarity polarity)
+{
+	std::lock_guard<std::mutex> lock(g_sceneMutex);
+	if (!leftCube || !rightCube) {
+		return;
+	}
+
+	if (!g_cubeBaseInitialized) {
+		g_leftCubeBasePos = leftCube->getLocalPos();
+		g_rightCubeBasePos = rightCube->getLocalPos();
+		g_cubeBaseInitialized = true;
+	}
+
+	cVector3d axis(0.0, 0.0, 0.0);
+	switch (g_activeSurfaceDirection) {
+	case FeedbackDirection::LATERAL_X: axis.set(1.0, 0.0, 0.0); break;
+	case FeedbackDirection::LATERAL_Y: axis.set(0.0, 1.0, 0.0); break;
+	case FeedbackDirection::VERTICAL_Z: axis.set(0.0, 0.0, 1.0); break;
+	}
+
+	if (axis.lengthsq() == 0.0) {
+		return;
+	}
+
+	const double polaritySign = (polarity == SurfacePolarity::POSITIVE) ? 1.0 : -1.0;
+	cVector3d shift = axis * (kSurfacePolarityOffset * polaritySign);
+	leftCube->setLocalPos(g_leftCubeBasePos + shift);
+	rightCube->setLocalPos(g_rightCubeBasePos + shift);
+
+	cVector3d faceOffset = axis * (polaritySign * (kCubeFaceHalfThickness + kHighlightLift));
+	if (leftCubeHighlight) {
+		leftCubeHighlight->setLocalPos(leftCube->getLocalPos() + faceOffset);
+		leftCubeHighlight->setEnabled(true);
+	}
+	if (rightCubeHighlight) {
+		rightCubeHighlight->setLocalPos(rightCube->getLocalPos() + faceOffset);
+		rightCubeHighlight->setEnabled(true);
+	}
+
+	cVector3d arrowDir = axis * polaritySign;
+	double arrowLen = arrowDir.length();
+	if (directionArrow && arrowLen > 1e-9) {
+		cVector3d arrowDirNorm = arrowDir / arrowLen;
+		directionArrow->m_pointA = cVector3d(0.0, 0.0, 0.0);
+		directionArrow->m_pointB = arrowDirNorm * kArrowLength;
+		directionArrow->setEnabled(true);
+
+	} else if (directionArrow) {
+		directionArrow->setEnabled(false);
+	}
+
+	if (directionArrowHead && arrowLen > 1e-9) {
+		cVector3d arrowDirNorm = arrowDir / arrowLen;
+		cVector3d arrowOrigin = directionArrow ? directionArrow->getLocalPos() : cVector3d(0.0, 0.0, 0.0);
+		cVector3d headPos = arrowOrigin + arrowDirNorm * (kArrowLength + kArrowHeadHeight * 0.5);
+		directionArrowHead->setLocalPos(headPos);
+		directionArrowHead->setLocalRot(computeArrowRotation(arrowDirNorm));
+		directionArrowHead->setEnabled(true);
+	} else if (directionArrowHead) {
+		directionArrowHead->setEnabled(false);
+	}
 }
 
 //------------------------------------------------------------------------------
-// 坐标变换函数实现 - 使用 cTransform 进行整体运算
+// ???????? - ?? cTransform ??????
 //------------------------------------------------------------------------------
 
 cTransform transformCameraToBase(const double camPos[3], const double camRot[9]) {
@@ -2942,7 +3131,7 @@ cTransform transformCameraToBase(const double camPos[3], const double camRot[9])
 	cTransform g_baseRef_inv(g_camera_T_base);
 	g_baseRef_inv.invert();
 
-	// 构建相机坐标系下的变换
+	// ???????????
 	cVector3d pos(
 		camPos[0] * 0.001, 
 		camPos[1] * 0.001, 
@@ -2954,7 +3143,7 @@ cTransform transformCameraToBase(const double camPos[3], const double camRot[9])
 
 	cTransform T_cam(pos, rot);
 
-	// 计算: base_T_marker = T_base_inv * T_cam
+	// ??: base_T_marker = T_base_inv * T_cam
 	cTransform base_T_marker;
 	base_T_marker = g_baseRef_inv * T_cam;
 
@@ -2971,7 +3160,7 @@ bool getMTMarkerTransform(const std::string& markerName, cTransform& outTransfor
 		return false;
 	}
 
-	// 获取完整的变换（从相机坐标系到VE坐标系）
+	// ???????(???????VE???)
 	outTransform = transformCameraToBase(pose.pos, pose.rot);
 	return true;
 }
@@ -2990,3 +3179,7 @@ void printTransform(const cTransform& T, const std::string& name) {
 			<< R(2, r) << std::endl;
 	}
 }
+
+
+
+

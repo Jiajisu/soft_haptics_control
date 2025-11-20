@@ -22,14 +22,15 @@ enum class ExperimentState {
     EXPERIMENT_COMPLETE  // 实验完成
 };
 
+enum class SurfacePolarity { POSITIVE = 1, NEGATIVE = -1 };
+
 struct TrialResult {
     int trialNumber;
     double referenceStiffness;
     double comparisonStiffness;
     int userChoice;
     double reactionTime;
-    int touchCountLeft;
-    int touchCountRight;
+    SurfacePolarity polarity;
     std::chrono::steady_clock::time_point trialStartTime;  // 按T时的时间
     std::chrono::steady_clock::time_point choiceTime;      // 按1或2时的时间
 };
@@ -38,6 +39,7 @@ struct TrialResult {
 struct TrialConfig {
     int stiffnessIndex;  // 0-10 (对应11个刚度比例)
     int repetition;      // 0-9 (每个刚度重复10次)
+    SurfacePolarity polarity;
 };
 
 // 新增：组配置结构体
@@ -76,7 +78,7 @@ public:
     bool hasNextTrial();
     void startNextTrial();
     void recordUserChoice(int choice);
-    void recordTouch(bool isLeftCube);
+    SurfacePolarity getCurrentPolarity() const { return m_currentPolarity; }
 
     /* --- 刚度 ----------------------------------------------------------- */
     double getCurrentReferenceStiffness() const;
@@ -99,6 +101,7 @@ private:
     FeedbackDirection m_currentDirection;
     int m_currentTrialGroup;    // 0-5
     int m_currentTrialInGroup;  // 0-109
+    SurfacePolarity m_currentPolarity;
 
     /* --- 刚度 ----------------------------------------------------------- */
     double m_referenceStiffness;

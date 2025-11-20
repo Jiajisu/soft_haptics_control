@@ -5,6 +5,20 @@
 #include <sstream>
 #include <iomanip>
 
+namespace {
+int polarityToInt(SurfacePolarity p) {
+    return (p == SurfacePolarity::POSITIVE) ? 1 : -1;
+}
+
+SurfacePolarity polarityFromInt(int v) {
+    return (v >= 0) ? SurfacePolarity::POSITIVE : SurfacePolarity::NEGATIVE;
+}
+
+std::string polarityToString(SurfacePolarity p) {
+    return (p == SurfacePolarity::POSITIVE) ? "positive" : "negative";
+}
+}
+
 UserStudyManager::UserStudyManager()
     : m_trialActive(false)
     , m_currentMode(InteractionMode::FORCE_TO_POSITION)
@@ -14,7 +28,8 @@ UserStudyManager::UserStudyManager()
     , m_referenceStiffness(1000.0)
     , m_sequenceLoaded(false)
     , m_experimentState(ExperimentState::NOT_STARTED)
-    , m_csvFileReady(false)  // ? ??????
+    , m_csvFileReady(false)
+    , m_currentPolarity(SurfacePolarity::POSITIVE)
 {
     generateComparisonStiffnesses();
 }
@@ -135,14 +150,13 @@ std::vector<TrialConfig> UserStudyManager::generateRandomizedTrials()
 {
     std::vector<TrialConfig> trials;
 
-    // ??110???:11?????,????10?
     for (int stiffnessIdx = 0; stiffnessIdx < 11; ++stiffnessIdx) {
         for (int rep = 0; rep < 10; ++rep) {
-            trials.push_back({ stiffnessIdx, rep });
+            SurfacePolarity pol = (rep < 5) ? SurfacePolarity::POSITIVE : SurfacePolarity::NEGATIVE;
+            trials.push_back({ stiffnessIdx, rep, pol });
         }
     }
 
-    // ????
     std::random_device rd;
     std::mt19937 g(rd());
     std::shuffle(trials.begin(), trials.end(), g);
@@ -168,7 +182,7 @@ void UserStudyManager::saveSequenceToFile(const std::string& filename)
         file << i << " " << (int)group.mode << " " << (int)group.direction << "\n";
     }
 
-    file << "\n# Trial Sequence (StiffnessIndex Repetition)\n";
+    file << "\n# Trial Sequence (StiffnessIndex Repetition Polarity)\n";
 
     // ??????????
     for (size_t groupIdx = 0; groupIdx < m_experimentSequence.size(); ++groupIdx) {
@@ -177,7 +191,9 @@ void UserStudyManager::saveSequenceToFile(const std::string& filename)
 
         // ?????110???
         for (size_t i = 0; i < trials.size(); ++i) {
-            file << trials[i].stiffnessIndex << " " << trials[i].repetition;
+            file << trials[i].stiffnessIndex << " "
+                << trials[i].repetition << " "
+                << polarityToInt(trials[i].polarity);
 
             // ??10???,????
             if ((i + 1) % 10 == 0) {
@@ -254,11 +270,26 @@ bool UserStudyManager::loadSequenceFromFile(const std::string& filename)
             }
 
             if (currentGroupIdx >= 0 && currentGroupIdx < m_experimentSequence.size()) {
-                // ??????
-                int stiffIdx, rep;
-                while (iss >> stiffIdx >> rep) {
+                std::vector<int> tokens;
+                int value;
+                while (iss >> value) {
+                    tokens.push_back(value);
+                }
+
+                size_t stride = 0;
+                if (!tokens.empty()) {
+                    stride = (tokens.size() % 3 == 0) ? 3 : 2;
+                }
+
+                for (size_t idx = 0; stride != 0 && idx + stride <= tokens.size(); idx += stride) {
+                    int stiffIdx = tokens[idx];
+                    int rep = tokens[idx + 1];
+                    SurfacePolarity pol = SurfacePolarity::POSITIVE;
+                    if (stride == 3) {
+                        pol = polarityFromInt(tokens[idx + 2]);
+                    }
                     if (m_experimentSequence[currentGroupIdx].trials.size() < 110) {
-                        m_experimentSequence[currentGroupIdx].trials.push_back({ stiffIdx, rep });
+                        m_experimentSequence[currentGroupIdx].trials.push_back({ stiffIdx, rep, pol });
                     }
                 }
 
@@ -434,8 +465,8 @@ void UserStudyManager::startNextTrial()
     m_currentTrial.trialNumber = m_currentTrialGroup * 110 + m_currentTrialInGroup;
     m_currentTrial.referenceStiffness = m_referenceStiffness;
     m_currentTrial.comparisonStiffness = m_comparisonStiffnesses[trialConfig.stiffnessIndex];
-    m_currentTrial.touchCountLeft = 0;
-    m_currentTrial.touchCountRight = 0;
+    m_currentPolarity = trialConfig.polarity;
+    m_currentTrial.polarity = m_currentPolarity;
     // ? ??:???T????????????
     m_currentTrial.trialStartTime = std::chrono::steady_clock::now();
     m_trialActive = true;
@@ -452,6 +483,9 @@ void UserStudyManager::startNextTrial()
     case FeedbackDirection::LATERAL_Y: std::cout << "Y"; break;
     case FeedbackDirection::VERTICAL_Z: std::cout << "Z"; break;
     }
+
+    std::cout << " | Polarity: "
+        << ((m_currentPolarity == SurfacePolarity::POSITIVE) ? "+ (Red)" : "- (Blue)");
 
     std::cout << "\nRef: " << m_currentTrial.referenceStiffness
         << " | Comp: " << m_currentTrial.comparisonStiffness
@@ -523,13 +557,6 @@ void UserStudyManager::recordUserChoice(int choice)
 }
 
 // ????????...
-void UserStudyManager::recordTouch(bool left)
-{
-    if (!m_trialActive) return;
-    if (left) ++m_currentTrial.touchCountLeft;
-    else ++m_currentTrial.touchCountRight;
-}
-
 double UserStudyManager::getCurrentReferenceStiffness() const
 {
     return m_currentTrial.referenceStiffness;
@@ -549,7 +576,7 @@ void UserStudyManager::saveResults(const std::string& fn)
     }
 
     file << "TrialNumber,Mode,Direction,ReferenceStiffness,ComparisonStiffness,"
-        << "UserChoice,ReactionTime,TouchCountLeft,TouchCountRight\n";
+        << "UserChoice,ReactionTime,Polarity\n";
 
     for (const auto& r : m_results) {
         // ??????????
@@ -563,8 +590,7 @@ void UserStudyManager::saveResults(const std::string& fn)
                 << r.comparisonStiffness << ','
                 << r.userChoice << ','
                 << r.reactionTime << ','
-                << r.touchCountLeft << ','
-                << r.touchCountRight << '\n';
+                << polarityToString(r.polarity) << '\n';
         }
     }
 
@@ -688,7 +714,7 @@ void UserStudyManager::createOrLoadUserCSV()
         std::ofstream newFile(csvFilename, std::ios::out);
         if (newFile.is_open()) {
             // ? ??:?????
-            std::string header = "TrialNumber,Mode,Direction,ReferenceStiffness,ComparisonStiffness,UserChoice,ReactionTime,TouchCountLeft,TouchCountRight";
+            std::string header = "TrialNumber,Mode,Direction,ReferenceStiffness,ComparisonStiffness,UserChoice,ReactionTime,Polarity";
             newFile << header << std::endl;
             newFile.flush();
 
@@ -748,8 +774,7 @@ void UserStudyManager::writeTrialToCSV(const TrialResult& trial)
             << std::fixed << std::setprecision(2) << trial.comparisonStiffness << ","
             << trial.userChoice << ","
             << std::fixed << std::setprecision(4) << trial.reactionTime << ","
-            << trial.touchCountLeft << ","
-            << trial.touchCountRight << std::endl;
+            << polarityToString(trial.polarity) << std::endl;
 
         csvFile.flush();
         std::cout << "[UserStudy] Trial data written to CSV file." << std::endl;
