@@ -12,6 +12,7 @@
 
 enum class InteractionMode { FORCE_TO_POSITION, FORCE_TO_FORCE };
 enum class FeedbackDirection { LATERAL_X, LATERAL_Y, VERTICAL_Z };
+enum class ExperimentType { NONE, EXPERIMENT1, EXPERIMENT2 };
 
 enum class ExperimentState {
     NOT_STARTED,      // 未开始
@@ -23,6 +24,22 @@ enum class ExperimentState {
 };
 
 enum class SurfacePolarity { POSITIVE = 1, NEGATIVE = -1 };
+
+struct AngleTrialConfig {
+    double angleX;
+    double angleZ;
+};
+
+struct AngleTrialResult {
+    int trialNumber;
+    double targetAngleX;
+    double targetAngleZ;
+    double userAngleX;
+    double userAngleZ;
+    double durationSeconds;
+    std::chrono::steady_clock::time_point trialStartTime;
+    std::chrono::steady_clock::time_point confirmTime;
+};
 
 struct TrialResult {
     int trialNumber;
@@ -79,6 +96,17 @@ public:
     void startNextTrial();
     void recordUserChoice(int choice);
     SurfacePolarity getCurrentPolarity() const { return m_currentPolarity; }
+    // Experiment 2 (angular discrimination)
+    bool hasNextTrialExp2() const;
+    void startNextTrialExp2();
+    void recordExp2UserAngles(double userAngleX, double userAngleZ, double durationSeconds);
+    double getExp2TargetAngleX() const;
+    double getExp2TargetAngleZ() const;
+    int getExp2CurrentTrialIndex() const { return m_exp2CurrentTrialIndex; }
+    ExperimentState getExp2State() const { return m_exp2State; }
+    bool isExp2TrialActive() const { return m_exp2TrialActive; }
+    bool isExp2BreakPending() const { return m_exp2NeedBreak; }
+    void clearExp2BreakFlag() { m_exp2NeedBreak = false; }
 
     /* --- 刚度 ----------------------------------------------------------- */
     double getCurrentReferenceStiffness() const;
@@ -124,14 +152,32 @@ private:
     bool loadSequenceFromFile(const std::string& filename);
     std::string getProgressFilename() const { return "user_" + m_userId + "_progress.txt"; }
     std::string getSequenceFilename() const { return "user_" + m_userId + "_sequence.txt"; }
+    std::string getExp2SequenceFilename() const { return "user_" + m_userId + "_sequence_exp2.txt"; }
 
     void createOrLoadUserCSV();
     std::string getUserCSVFilename() const { return "user_" + m_userId + "_experiment_data.csv"; }
+    void createOrLoadUserCSVExp2();
+    std::string getUserExp2CSVFilename() const { return "user_" + m_userId + "_experiment2_data.csv"; }
 
     void writeTrialToCSV(const TrialResult& trial);
+    void writeExp2TrialToCSV(const AngleTrialResult& trial);
     bool m_csvFileReady = false;
+    bool m_exp2CsvFileReady = false;
 
     ExperimentState m_experimentState;
+    ExperimentState m_exp2State;
+    // Experiment 2 data
+    std::vector<AngleTrialConfig> m_exp2Sequence;
+    bool m_exp2SequenceLoaded = false;
+    int m_exp2CurrentTrialIndex = 0;
+    bool m_exp2TrialActive = false;
+    bool m_exp2NeedBreak = false;
+    AngleTrialResult m_exp2CurrentTrial;
+    std::vector<AngleTrialResult> m_exp2Results;
+    std::chrono::steady_clock::time_point m_exp2TrialStart;
+    void generateExp2Sequence();
+    bool loadExp2Sequence(const std::string& filename);
+    void saveExp2Sequence(const std::string& filename);
 
 };
 

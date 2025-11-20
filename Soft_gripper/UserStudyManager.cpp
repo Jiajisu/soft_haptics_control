@@ -30,6 +30,7 @@ UserStudyManager::UserStudyManager()
     , m_experimentState(ExperimentState::NOT_STARTED)
     , m_csvFileReady(false)
     , m_currentPolarity(SurfacePolarity::POSITIVE)
+    , m_exp2State(ExperimentState::NOT_STARTED)
 {
     generateComparisonStiffnesses();
 }
@@ -58,56 +59,56 @@ bool UserStudyManager::loadOrCreateUserSession(const std::string& userId)
 {
     m_userId = userId;
 
-    std::cout << "[UserStudy] Setting user ID: " << userId << std::endl;  // ????
+    std::cout << "[UserStudy] Setting user ID: " << userId << std::endl;
 
-    // ???????????
-    if (loadSequenceFromFile(getSequenceFilename())) {
-        std::cout << "[UserStudy] Loaded existing sequence for user: " << userId << std::endl;
-
-        // ??????
-        if (loadProgress(getProgressFilename())) {
-            std::cout << "[UserStudy] Resumed from Group " << m_currentTrialGroup + 1
-                << "/6, Trial " << m_currentTrialInGroup + 1 << "/110" << std::endl;
-
-            // ??????
-            if (m_currentTrialGroup >= 6) {
-                m_experimentState = ExperimentState::EXPERIMENT_COMPLETE;
-                std::cout << "[UserStudy] This user has already completed the experiment!" << std::endl;
-            }
-            else if (m_currentTrialInGroup >= 110) {
-                m_experimentState = ExperimentState::GROUP_COMPLETE;
-                std::cout << "[UserStudy] Current group is complete. Press 'T' to start next group." << std::endl;
-            }
-            else {
-                m_experimentState = ExperimentState::READY;
-                std::cout << "[UserStudy] Ready to continue. Press 'T' to start next trial." << std::endl;
-            }
-        }
-        else {
-            // ????????,????
-            m_experimentState = ExperimentState::READY;
-            std::cout << "[UserStudy] Starting from beginning. Press 'T' to start first trial." << std::endl;
-        }
-    }
-    else {
-        // ????????
-        std::cout << "[UserStudy] Creating new sequence for user: " << userId << std::endl;
+    bool seq1Loaded = loadSequenceFromFile(getSequenceFilename());
+    if (!seq1Loaded) {
+        std::cout << "[UserStudy] No Experiment 1 sequence found. Generating new." << std::endl;
         generateRandomSequence();
         saveSequenceToFile(getSequenceFilename());
+    }
+    bool seq2Loaded = loadExp2Sequence(getExp2SequenceFilename());
+    if (!seq2Loaded) {
+        std::cout << "[UserStudy] No Experiment 2 sequence found. Generating new." << std::endl;
+        generateExp2Sequence();
+        saveExp2Sequence(getExp2SequenceFilename());
+    }
 
-        // ?????
+    if (loadProgress(getProgressFilename())) {
+        std::cout << "[UserStudy] Progress loaded: Exp1 Group "
+            << (m_currentTrialGroup + 1) << "/6 Trial "
+            << (m_currentTrialInGroup + 1) << "/110" << std::endl;
+    }
+    else {
+        std::cout << "[UserStudy] No progress file found. Starting fresh." << std::endl;
         m_currentTrialGroup = 0;
         m_currentTrialInGroup = 0;
         m_experimentState = ExperimentState::READY;
+        m_exp2CurrentTrialIndex = 0;
+        m_exp2State = ExperimentState::READY;
         saveProgress();
-
-        std::cout << "[UserStudy] New experiment ready. Press 'T' to start first trial." << std::endl;
     }
 
-    // ? ??:?????CSV??????
-    std::cout << "[UserStudy] Initializing CSV file..." << std::endl;
+    if (m_currentTrialGroup >= 6) {
+        m_experimentState = ExperimentState::EXPERIMENT_COMPLETE;
+    }
+    else if (m_currentTrialInGroup >= 110) {
+        m_experimentState = ExperimentState::GROUP_COMPLETE;
+    }
+    else if (m_experimentState != ExperimentState::IN_PROGRESS) {
+        m_experimentState = ExperimentState::READY;
+    }
+
+    if (m_exp2CurrentTrialIndex >= static_cast<int>(m_exp2Sequence.size())) {
+        m_exp2State = ExperimentState::EXPERIMENT_COMPLETE;
+    }
+    else if (m_exp2State != ExperimentState::IN_PROGRESS) {
+        m_exp2State = ExperimentState::READY;
+    }
+
+    std::cout << "[UserStudy] Initializing CSV files..." << std::endl;
     createOrLoadUserCSV();
-    std::cout << "[UserStudy] CSV initialization complete. Ready: " << (m_csvFileReady ? "YES" : "NO") << std::endl;
+    createOrLoadUserCSVExp2();
 
     return true;
 }
@@ -164,6 +165,27 @@ std::vector<TrialConfig> UserStudyManager::generateRandomizedTrials()
     return trials;
 }
 
+void UserStudyManager::generateExp2Sequence()
+{
+    m_exp2Sequence.clear();
+    const std::vector<double> angles = { 0.0, 30.0, 60.0, 90.0, 120.0, 150.0 };
+    std::vector<AngleTrialConfig> combos;
+    for (double ax : angles) {
+        for (double az : angles) {
+            combos.push_back({ ax, az });
+        }
+    }
+
+    for (int rep = 0; rep < 5; ++rep) {
+        m_exp2Sequence.insert(m_exp2Sequence.end(), combos.begin(), combos.end());
+    }
+
+    std::random_device rd;
+    std::mt19937 g(rd());
+    std::shuffle(m_exp2Sequence.begin(), m_exp2Sequence.end(), g);
+    m_exp2SequenceLoaded = true;
+}
+
 // ???????
 void UserStudyManager::saveSequenceToFile(const std::string& filename)
 {
@@ -212,6 +234,20 @@ void UserStudyManager::saveSequenceToFile(const std::string& filename)
 
     file.close();
     std::cout << "[UserStudy] Sequence saved to: " << filename << std::endl;
+}
+
+void UserStudyManager::saveExp2Sequence(const std::string& filename)
+{
+    std::ofstream file(filename);
+    if (!file) {
+        std::cerr << "[UserStudy][Exp2] Cannot save sequence: " << filename << std::endl;
+        return;
+    }
+    file << "# Experiment2 angle sequence (angleX angleZ)\n";
+    for (const auto& t : m_exp2Sequence) {
+        file << t.angleX << " " << t.angleZ << "\n";
+    }
+    file.close();
 }
 
 // ???????
@@ -338,6 +374,21 @@ bool UserStudyManager::loadSequenceFromFile(const std::string& filename)
     return m_sequenceLoaded;
 }
 
+bool UserStudyManager::loadExp2Sequence(const std::string& filename)
+{
+    std::ifstream file(filename);
+    if (!file) {
+        return false;
+    }
+    m_exp2Sequence.clear();
+    double ax, az;
+    while (file >> ax >> az) {
+        m_exp2Sequence.push_back({ ax, az });
+    }
+    m_exp2SequenceLoaded = (m_exp2Sequence.size() == 180);
+    return m_exp2SequenceLoaded;
+}
+
 // ????
 void UserStudyManager::saveProgress()
 {
@@ -347,6 +398,8 @@ void UserStudyManager::saveProgress()
     file << "# Progress for User: " << m_userId << "\n";
     file << "CurrentGroup " << m_currentTrialGroup << "\n";
     file << "CurrentTrialInGroup " << m_currentTrialInGroup << "\n";
+    file << "Exp2CurrentTrial " << m_exp2CurrentTrialIndex << "\n";
+    file << "Exp2State " << static_cast<int>(m_exp2State) << "\n";
     file << "TotalTrialsCompleted " << m_results.size() << "\n";
 
     file.close();
@@ -371,6 +424,16 @@ bool UserStudyManager::loadProgress(const std::string& filename)
             }
             else if (key == "CurrentTrialInGroup") {
                 iss >> m_currentTrialInGroup;
+            }
+            else if (key == "Exp2CurrentTrial") {
+                iss >> m_exp2CurrentTrialIndex;
+                if (m_exp2CurrentTrialIndex < 0) m_exp2CurrentTrialIndex = 0;
+            }
+            else if (key == "Exp2State") {
+                int stateInt = 0;
+                iss >> stateInt;
+                if (stateInt < 0 || stateInt > static_cast<int>(ExperimentState::EXPERIMENT_COMPLETE)) stateInt = 0;
+                m_exp2State = static_cast<ExperimentState>(stateInt);
             }
             else if (key == "TotalTrialsCompleted") {
                 int totalCompleted;
@@ -684,6 +747,75 @@ bool UserStudyManager::hasNextTrial()
     return true;
 }
 
+bool UserStudyManager::hasNextTrialExp2() const
+{
+    if (!m_exp2SequenceLoaded ||
+        m_exp2State == ExperimentState::EXPERIMENT_COMPLETE) {
+        return false;
+    }
+    return m_exp2CurrentTrialIndex < static_cast<int>(m_exp2Sequence.size());
+}
+
+void UserStudyManager::startNextTrialExp2()
+{
+    if (!hasNextTrialExp2()) {
+        if (m_exp2CurrentTrialIndex >= static_cast<int>(m_exp2Sequence.size())) {
+            m_exp2State = ExperimentState::EXPERIMENT_COMPLETE;
+        }
+        return;
+    }
+
+    const auto& cfg = m_exp2Sequence[m_exp2CurrentTrialIndex];
+    m_exp2CurrentTrial.trialNumber = m_exp2CurrentTrialIndex;
+    m_exp2CurrentTrial.targetAngleX = cfg.angleX;
+    m_exp2CurrentTrial.targetAngleZ = cfg.angleZ;
+    m_exp2CurrentTrial.trialStartTime = std::chrono::steady_clock::now();
+    m_exp2TrialStart = m_exp2CurrentTrial.trialStartTime;
+    m_exp2TrialActive = true;
+    m_exp2State = ExperimentState::IN_PROGRESS;
+    m_exp2NeedBreak = false;
+}
+
+void UserStudyManager::recordExp2UserAngles(double userAngleX, double userAngleZ, double durationSeconds)
+{
+    if (!m_exp2TrialActive) {
+        std::cout << "[UserStudy][Exp2] No active trial to record.\n";
+        return;
+    }
+
+    m_exp2CurrentTrial.confirmTime = std::chrono::steady_clock::now();
+    m_exp2CurrentTrial.userAngleX = userAngleX;
+    m_exp2CurrentTrial.userAngleZ = userAngleZ;
+    m_exp2CurrentTrial.durationSeconds = durationSeconds;
+    m_exp2Results.push_back(m_exp2CurrentTrial);
+    if (m_exp2CsvFileReady) {
+        writeExp2TrialToCSV(m_exp2CurrentTrial);
+    }
+
+    m_exp2TrialActive = false;
+    m_exp2CurrentTrialIndex++;
+    if (m_exp2CurrentTrialIndex >= static_cast<int>(m_exp2Sequence.size())) {
+        m_exp2State = ExperimentState::EXPERIMENT_COMPLETE;
+    }
+    else {
+        m_exp2State = ExperimentState::TRIAL_COMPLETE;
+        if (m_exp2CurrentTrialIndex % 60 == 0) {
+            m_exp2NeedBreak = true;
+        }
+    }
+    saveProgress();
+}
+
+double UserStudyManager::getExp2TargetAngleX() const
+{
+    return m_exp2CurrentTrial.targetAngleX;
+}
+
+double UserStudyManager::getExp2TargetAngleZ() const
+{
+    return m_exp2CurrentTrial.targetAngleZ;
+}
+
 void UserStudyManager::createOrLoadUserCSV()
 {
     std::string csvFilename = getUserCSVFilename();
@@ -781,6 +913,48 @@ void UserStudyManager::writeTrialToCSV(const TrialResult& trial)
     }
 
     csvFile.close();
+}
+
+void UserStudyManager::createOrLoadUserCSVExp2()
+{
+    std::string csvFilename = getUserExp2CSVFilename();
+    std::ifstream check(csvFilename);
+    bool exists = false;
+    if (check.is_open()) {
+        check.seekg(0, std::ios::end);
+        exists = (check.tellg() > 0);
+        check.close();
+    }
+
+    if (!exists) {
+        std::ofstream file(csvFilename, std::ios::out);
+        if (!file.is_open()) {
+            std::cerr << "[UserStudy][Exp2] ERROR: Cannot create CSV file!\n";
+            m_exp2CsvFileReady = false;
+            return;
+        }
+        file << "TrialNumber,TargetAngleX,TargetAngleZ,UserAngleX,UserAngleZ,DurationSeconds\n";
+        file.close();
+    }
+
+    m_exp2CsvFileReady = true;
+}
+
+void UserStudyManager::writeExp2TrialToCSV(const AngleTrialResult& trial)
+{
+    if (!m_exp2CsvFileReady) return;
+    std::ofstream file(getUserExp2CSVFilename(), std::ios::app);
+    if (!file.is_open()) {
+        std::cerr << "[UserStudy][Exp2] ERROR: Cannot open CSV for writing\n";
+        return;
+    }
+    file << trial.trialNumber << ","
+        << std::fixed << std::setprecision(2) << trial.targetAngleX << ","
+        << trial.targetAngleZ << ","
+        << trial.userAngleX << ","
+        << trial.userAngleZ << ","
+        << std::fixed << std::setprecision(3) << trial.durationSeconds << "\n";
+    file.close();
 }
 
 
