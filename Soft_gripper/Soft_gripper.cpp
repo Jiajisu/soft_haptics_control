@@ -73,6 +73,10 @@ bool g_exp2PlaneInitialized = false;
 std::atomic<double> g_exp2PendingAngleX{ 0.0 };
 std::atomic<double> g_exp2PendingAngleZ{ 0.0 };
 std::atomic<bool> g_exp2AnglesPending{ false };
+cMatrix3d g_exp2VisibleBaseRot;
+cMatrix3d g_exp2HiddenBaseRot;
+cMatrix3d g_exp2VisibleInitialRot;
+cMatrix3d g_exp2HiddenInitialRot;
 cMesh* leftCubeHighlight = nullptr;
 cMesh* rightCubeHighlight = nullptr;
 const double kHighlightThickness = 0.0005;
@@ -141,6 +145,20 @@ bool isPointInsideBox(const cVector3d& point,
 	return (std::fabs(delta.x()) <= (halfExtents.x() + margin)) &&
 		(std::fabs(delta.y()) <= (halfExtents.y() + margin)) &&
 		(std::fabs(delta.z()) <= (halfExtents.z() + margin));
+}
+
+void applyExp2RotationToMesh(cMesh* mesh,
+	const cMatrix3d& baseRot,
+	double angleXDeg,
+	double angleZDeg)
+{
+	if (!mesh) return;
+	cMatrix3d rot = baseRot;
+	const cVector3d axisX = baseRot * cVector3d(1.0, 0.0, 0.0);
+	const cVector3d axisZ = baseRot * cVector3d(0.0, 0.0, 1.0);
+	rot.rotateAboutGlobalAxisRad(axisX, cDegToRad(angleXDeg));
+	rot.rotateAboutGlobalAxisRad(axisZ, cDegToRad(angleZDeg));
+	mesh->setLocalRot(rot);
 }
 
 void rebuildHighlightMesh(cMesh* mesh, FeedbackDirection direction)
@@ -311,6 +329,8 @@ void showExperiment2Objects(bool show)
 
 void applyExp2UserAngles()
 {
+	// Apply user angles relative to the initial visible-plane orientation
+	g_exp2VisibleBaseRot = g_exp2VisibleInitialRot;
 	g_exp2PendingAngleX.store(g_exp2UserAngleX, std::memory_order_relaxed);
 	g_exp2PendingAngleZ.store(g_exp2UserAngleZ, std::memory_order_relaxed);
 	g_exp2AnglesPending.store(true, std::memory_order_release);
@@ -330,11 +350,7 @@ void processPendingExp2AnglesLocked()
 	double angleX = g_exp2PendingAngleX.load(std::memory_order_relaxed);
 	double angleZ = g_exp2PendingAngleZ.load(std::memory_order_relaxed);
 
-	cMatrix3d rot;
-	rot.identity();
-	rot.rotateAboutGlobalAxisRad(cVector3d(1.0, 0.0, 0.0), cDegToRad(angleX));
-	rot.rotateAboutGlobalAxisRad(cVector3d(0.0, 0.0, 1.0), cDegToRad(angleZ));
-	g_exp2VisiblePlane->setLocalRot(rot);
+	applyExp2RotationToMesh(g_exp2VisiblePlane, g_exp2VisibleBaseRot, angleX, angleZ);
 
 	g_exp2AnglesPending.store(false, std::memory_order_release);
 }
@@ -350,11 +366,10 @@ void applyExp2TargetAngles()
 	std::lock_guard<std::mutex> lock(g_sceneMutex);
 	if (!g_exp2HiddenPlane) return;
 
-	cMatrix3d rot;
-	rot.identity();
-	rot.rotateAboutGlobalAxisRad(cVector3d(1.0, 0.0, 0.0), cDegToRad(g_exp2TargetAngleX));
-	rot.rotateAboutGlobalAxisRad(cVector3d(0.0, 0.0, 1.0), cDegToRad(g_exp2TargetAngleZ));
-	g_exp2HiddenPlane->setLocalRot(rot);
+	// Always start hidden plane rotations from its baseline (0,0,0) then apply target angles
+	g_exp2HiddenBaseRot = g_exp2HiddenInitialRot;
+
+	applyExp2RotationToMesh(g_exp2HiddenPlane, g_exp2HiddenBaseRot, g_exp2TargetAngleX, g_exp2TargetAngleZ);
 }
 
 bool startNextExp2Trial()
@@ -1533,25 +1548,29 @@ applyDefaultCameraView();
 	rightCubeHighlight = new cMesh();
 	cCreateBox(rightCubeHighlight, kCubeFaceLength, kCubeFaceWidth, kHighlightThickness);
 	rightCubeHighlight->m_material->m_ambient = kHighlightColor;
-rightCubeHighlight->m_material->m_diffuse = kHighlightColor;
-rightCubeHighlight->setUseTransparency(false);
-rightCubeHighlight->setEnabled(false);
-world->addChild(rightCubeHighlight);
+	rightCubeHighlight->m_material->m_diffuse = kHighlightColor;
+	rightCubeHighlight->setUseTransparency(false);
+	rightCubeHighlight->setEnabled(false);
+	world->addChild(rightCubeHighlight);
 
 // Experiment 2 planes (visible/invisible)
-g_exp2VisiblePlane = new cMesh();
-world->addChild(g_exp2VisiblePlane);
-cCreateBox(g_exp2VisiblePlane, kExp2PlaneHeight, kExp2PlaneThickness, kExp2PlaneWidth);
+	g_exp2VisiblePlane = new cMesh();
+	world->addChild(g_exp2VisiblePlane);
+	cCreateBox(g_exp2VisiblePlane, kExp2PlaneHeight, kExp2PlaneThickness, kExp2PlaneWidth);
 	g_exp2VisiblePlane->setLocalPos(kExp2PlaneCenter);
 	g_exp2VisiblePlane->m_material->setRedDark();
+	g_exp2VisibleInitialRot = g_exp2VisiblePlane->getLocalRot();
+	g_exp2VisibleBaseRot = g_exp2VisibleInitialRot;
 	g_exp2VisiblePlane->setUseDisplayList(true);
 	g_exp2VisiblePlane->setEnabled(false);
 
 	g_exp2HiddenPlane = new cMesh();
 	world->addChild(g_exp2HiddenPlane);
-	cCreateBox(g_exp2HiddenPlane, kExp2PlaneHeight, kExp2PlaneThickness, kExp2PlaneWidth);
+	cCreateBox(g_exp2HiddenPlane, kExp2PlaneHeight * 8, kExp2PlaneThickness , kExp2PlaneWidth * 8);
 	g_exp2HiddenPlane->setLocalPos(kExp2PlaneCenter);
 	g_exp2HiddenPlane->m_material->setBlueRoyal();
+	g_exp2HiddenInitialRot = g_exp2HiddenPlane->getLocalRot();
+	g_exp2HiddenBaseRot = g_exp2HiddenInitialRot;
 	g_exp2HiddenPlane->setUseDisplayList(true);
 	//g_exp2HiddenPlane->setShowTriangles(false);
 	//g_exp2HiddenPlane->setShowEdges(false);
@@ -1823,19 +1842,31 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 			a_key == GLFW_KEY_LEFT || a_key == GLFW_KEY_RIGHT))
 	{
 		if (userStudy && userStudy->isExp2TrialActive()) {
+			double deltaX = 0.0;
+			double deltaZ = 0.0;
 			if (a_key == GLFW_KEY_UP) {
-				g_exp2UserAngleX = clampAngleValue(g_exp2UserAngleX + kExp2AngleStepDeg, kExp2MinAngleDeg, kExp2MaxAngleDeg);
+				deltaX = kExp2AngleStepDeg;
+				g_exp2UserAngleX = clampAngleValue(g_exp2UserAngleX + deltaX, kExp2MinAngleDeg, kExp2MaxAngleDeg);
 			}
 			else if (a_key == GLFW_KEY_DOWN) {
-				g_exp2UserAngleX = clampAngleValue(g_exp2UserAngleX - kExp2AngleStepDeg, kExp2MinAngleDeg, kExp2MaxAngleDeg);
+				deltaX = -kExp2AngleStepDeg;
+				g_exp2UserAngleX = clampAngleValue(g_exp2UserAngleX + deltaX, kExp2MinAngleDeg, kExp2MaxAngleDeg);
 			}
 			else if (a_key == GLFW_KEY_LEFT) {
-				g_exp2UserAngleZ = clampAngleValue(g_exp2UserAngleZ + kExp2AngleStepDeg, kExp2MinAngleDeg, kExp2MaxAngleDeg);
+				deltaZ = kExp2AngleStepDeg;
+				g_exp2UserAngleZ = clampAngleValue(g_exp2UserAngleZ + deltaZ, kExp2MinAngleDeg, kExp2MaxAngleDeg);
 			}
 			else if (a_key == GLFW_KEY_RIGHT) {
-				g_exp2UserAngleZ = clampAngleValue(g_exp2UserAngleZ - kExp2AngleStepDeg, kExp2MinAngleDeg, kExp2MaxAngleDeg);
+				deltaZ = -kExp2AngleStepDeg;
+				g_exp2UserAngleZ = clampAngleValue(g_exp2UserAngleZ + deltaZ, kExp2MinAngleDeg, kExp2MaxAngleDeg);
 			}
-			applyExp2UserAngles();
+			{
+				std::lock_guard<std::mutex> lock(g_sceneMutex);
+				g_exp2VisibleBaseRot = g_exp2VisibleInitialRot;
+				g_exp2PendingAngleX.store(g_exp2UserAngleX, std::memory_order_relaxed);
+				g_exp2PendingAngleZ.store(g_exp2UserAngleZ, std::memory_order_relaxed);
+				g_exp2AnglesPending.store(true, std::memory_order_release);
+			}
 			updateExperiment2Labels();
 		}
 	}
