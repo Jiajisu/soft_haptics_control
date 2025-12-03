@@ -15,6 +15,7 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <cmath>
 #include <limits>
 #include <sstream>
 
@@ -55,10 +56,16 @@ bool experimentMode = false;  // ?????????
 // ???????????
 cMesh* leftCube = nullptr;
 cMesh* rightCube = nullptr;
-static cVector3d g_leftCubeBasePos(0.0, 0.0, 0.0);
-static cVector3d g_rightCubeBasePos(0.0, 0.0, 0.0);
+const cVector3d kDefaultLeftCubeBasePos(0.00, -0.05, 0.12);
+const cVector3d kDefaultRightCubeBasePos(0.00, 0.05, 0.12);
+const cVector3d kLateralXLeftCubeBasePos(0.00, -0.05, 0.05);
+const cVector3d kLateralXRightCubeBasePos(0.00, 0.05, 0.05);
+const cVector3d kLateralYLeftCubeBasePos(0.00, 0.0, 0.12);
+const cVector3d kLateralYRightCubeBasePos(0.00, 0.0, 0.04);
+static cVector3d g_leftCubeBasePos = kDefaultLeftCubeBasePos;
+static cVector3d g_rightCubeBasePos = kDefaultRightCubeBasePos;
 static bool g_cubeBaseInitialized = false;
-const double kSurfacePolarityOffset = 0.03;
+const double kSurfacePolarityOffset = 0.04;
 static FeedbackDirection g_activeSurfaceDirection = FeedbackDirection::VERTICAL_Z;
 cMesh* g_exp2VisiblePlane = nullptr;
 cMesh* g_exp2HiddenPlane = nullptr;
@@ -71,14 +78,107 @@ cMesh* rightCubeHighlight = nullptr;
 const double kHighlightThickness = 0.0005;
 const double kHighlightLift = 0.0000001;
 const double kCubeFaceThickness = 0.004;
+const double kCubeFaceLength = 0.06;
+const double kCubeFaceWidth = 0.06;
 const double kCubeFaceHalfThickness = kCubeFaceThickness * 0.5;
+const double kSurfaceChangeSafetyMargin = 0.0025;
 const cColorf kHighlightColor(1.0f, 0.25f, 0.25f, 1.0f);
+
+namespace {
+
+void computeCubeBasePositionsForDirection(FeedbackDirection direction,
+	cVector3d& leftPos,
+	cVector3d& rightPos)
+{
+	switch (direction) {
+	case FeedbackDirection::LATERAL_X:
+		leftPos = kLateralXLeftCubeBasePos;
+		rightPos = kLateralXRightCubeBasePos;
+		break;
+
+	case FeedbackDirection::LATERAL_Y:
+		leftPos = kLateralYLeftCubeBasePos;
+		rightPos = kLateralYRightCubeBasePos;
+		break;
+
+	case FeedbackDirection::VERTICAL_Z:
+	default:
+		leftPos = kDefaultLeftCubeBasePos;
+		rightPos = kDefaultRightCubeBasePos;
+		break;
+	}
+}
+
+cVector3d getAxisForDirection(FeedbackDirection direction)
+{
+	switch (direction) {
+	case FeedbackDirection::LATERAL_X: return cVector3d(1.0, 0.0, 0.0);
+	case FeedbackDirection::LATERAL_Y: return cVector3d(0.0, 1.0, 0.0);
+	case FeedbackDirection::VERTICAL_Z:
+	default: return cVector3d(0.0, 0.0, 1.0);
+	}
+}
+
+cVector3d getCubeHalfExtents(FeedbackDirection direction)
+{
+	switch (direction) {
+	case FeedbackDirection::LATERAL_X:
+		return cVector3d(kCubeFaceThickness * 0.5, kCubeFaceLength * 0.5, kCubeFaceWidth * 0.5);
+	case FeedbackDirection::LATERAL_Y:
+		return cVector3d(kCubeFaceLength * 0.5, kCubeFaceThickness * 0.5, kCubeFaceWidth * 0.5);
+	case FeedbackDirection::VERTICAL_Z:
+	default:
+		return cVector3d(kCubeFaceLength * 0.5, kCubeFaceWidth * 0.5, kCubeFaceThickness * 0.5);
+	}
+}
+
+bool isPointInsideBox(const cVector3d& point,
+	const cVector3d& center,
+	const cVector3d& halfExtents,
+	double margin)
+{
+	cVector3d delta = point - center;
+	return (std::fabs(delta.x()) <= (halfExtents.x() + margin)) &&
+		(std::fabs(delta.y()) <= (halfExtents.y() + margin)) &&
+		(std::fabs(delta.z()) <= (halfExtents.z() + margin));
+}
+
+void rebuildHighlightMesh(cMesh* mesh, FeedbackDirection direction)
+{
+	if (!mesh) return;
+	mesh->clear();
+	switch (direction) {
+	case FeedbackDirection::LATERAL_X:
+		cCreateBox(mesh, kHighlightThickness, kCubeFaceLength, kCubeFaceWidth);
+		break;
+	case FeedbackDirection::LATERAL_Y:
+		cCreateBox(mesh, kCubeFaceLength, kHighlightThickness, kCubeFaceWidth);
+		break;
+	case FeedbackDirection::VERTICAL_Z:
+	default:
+		cCreateBox(mesh, kCubeFaceLength, kCubeFaceWidth, kHighlightThickness);
+		break;
+	}
+	mesh->m_material->m_ambient = kHighlightColor;
+	mesh->m_material->m_diffuse = kHighlightColor;
+	mesh->setUseTransparency(false);
+}
+
+} // namespace
+
 cLabel* labelExp2Debug = nullptr;
-cShapeLine* directionArrow = nullptr;
-const double kArrowLength = 0.01;
-cMesh* directionArrowHead = nullptr;
-const double kArrowHeadHeight = 0.003;
-const double kArrowHeadRadius = 0.0015;
+const cVector3d kDefaultCameraPos(0.2, 0.05, 0.15);
+const cVector3d kDefaultCameraLook(0.0, 0.0, 0.015);
+const cVector3d kDefaultCameraUp(0.0, 0.0, 1.0);
+const cVector3d kCameraPosX(0.001, 0.0, 0.28);
+const cVector3d kCameraLookX(0.002, 0.0, 0.10);
+const cVector3d kCameraUpX(0.0, 0.0, -1.0);
+const cVector3d kCameraPosY(0.2, 0.0, 0.22);
+const cVector3d kCameraLookY(0.0, 0.0, 0.06);
+const cVector3d kCameraUpY(0.0, 0.0, 1.0);
+const cVector3d kCameraPosZ(0.25, 0.0, 0.12);
+const cVector3d kCameraLookZ(0.05, 0.0, 0.12);
+const cVector3d kCameraUpZ(0.0, 0.0, 1.0);
 const double kExp2PlaneWidth = 0.08;
 const double kExp2PlaneHeight = 0.08;
 const double kExp2PlaneThickness = 0.0008;
@@ -97,10 +197,14 @@ void updateExperimentLabels();
 void updateSurfaceOrientation(FeedbackDirection direction);
 void applySurfacePolarity(SurfacePolarity polarity);
 void rebuildHighlightMeshes(FeedbackDirection direction);
+void updateCubeBasePositions(FeedbackDirection direction);
+void applyDefaultCameraView();
+void updateExperimentCamera(FeedbackDirection direction);
 void showExperiment2Objects(bool show);
 extern bool hasInitPress;
 extern cVector3d presCurr;
 extern ControlPCC ResolvedRateControl;
+extern cCamera* camera;
 bool ensureUserStudyLoaded();
 void deactivateCurrentExperimentObjects();
 void activateExperimentMode(ExperimentType type);
@@ -111,6 +215,9 @@ void processPendingExp2AnglesLocked();
 void flushPendingExp2Angles();
 bool startNextExp2Trial();
 static ExperimentType g_activeExperiment = ExperimentType::NONE;
+bool ensureToolClearForSurfaceChange(FeedbackDirection direction,
+	SurfacePolarity polarity,
+	const std::string& contextMessage = "");
 
 inline double clampAngleValue(double value, double minVal, double maxVal)
 {
@@ -142,8 +249,6 @@ void showExperimentObjects(bool show)
 		if (rightCube) rightCube->setEnabled(show);
 		if (leftCubeHighlight) leftCubeHighlight->setEnabled(show);
 		if (rightCubeHighlight) rightCubeHighlight->setEnabled(show);
-		if (directionArrow) directionArrow->setEnabled(show);
-		if (directionArrowHead) directionArrowHead->setEnabled(show);
 
 		// ??/??????
 		if (labelExperimentInstructions) labelExperimentInstructions->setEnabled(show);
@@ -152,6 +257,38 @@ void showExperimentObjects(bool show)
 
 	if (show && userStudy) {
 		applySurfacePolarity(userStudy->getCurrentPolarity());
+	}
+}
+
+void setCameraView(const cVector3d& eye, const cVector3d& look, const cVector3d& up)
+{
+	if (camera) {
+		camera->set(eye, look, up);
+	}
+}
+
+void applyDefaultCameraView()
+{
+	setCameraView(kDefaultCameraPos, kDefaultCameraLook, kDefaultCameraUp);
+}
+
+void updateExperimentCamera(FeedbackDirection direction)
+{
+	if (!experimentMode || g_activeExperiment != ExperimentType::EXPERIMENT1) return;
+
+	switch (direction) {
+	case FeedbackDirection::LATERAL_X:
+		setCameraView(kCameraPosX, kCameraLookX, kCameraUpX);
+		break;
+
+	case FeedbackDirection::LATERAL_Y:
+		setCameraView(kCameraPosY, kCameraLookY, kCameraUpY);
+		break;
+
+	case FeedbackDirection::VERTICAL_Z:
+	default:
+		setCameraView(kCameraPosZ, kCameraLookZ, kCameraUpZ);
+		break;
 	}
 }
 
@@ -370,6 +507,14 @@ void activateExperimentMode(ExperimentType type)
 {
 	if (!ensureUserStudyLoaded()) return;
 	if (g_activeExperiment == type) return;
+	if (type == ExperimentType::EXPERIMENT1 && userStudy) {
+		if (!ensureToolClearForSurfaceChange(
+			userStudy->getCurrentDirection(),
+			userStudy->getCurrentPolarity(),
+			"entering Experiment 1")) {
+			return;
+		}
+	}
 
 	deactivateCurrentExperimentObjects();
 	showOriginalObjects(false);
@@ -392,6 +537,7 @@ void activateExperimentMode(ExperimentType type)
 		g_exp2DebugMode = false;
 		showExperiment2Objects(true);
 		experimentMode = false;
+		applyDefaultCameraView();
 		g_activeExperiment = ExperimentType::EXPERIMENT2;
 		if (labelExperimentInstructions) labelExperimentInstructions->setEnabled(true);
 		if (labelTrialInfo) labelTrialInfo->setEnabled(true);
@@ -421,6 +567,7 @@ void exitExperimentMode()
 	if (labelExp2Debug) labelExp2Debug->setEnabled(false);
 	g_activeExperiment = ExperimentType::NONE;
 	experimentMode = false;
+	applyDefaultCameraView();
 	std::cout << "====== EXPERIMENT MODE OFF ======\n";
 }
 
@@ -772,6 +919,46 @@ cGenericHapticDevicePtr hapticDevice;
 // a virtual tool representing the haptic device in the scene
 cToolCursor* tool;
 
+bool ensureToolClearForSurfaceChange(FeedbackDirection direction,
+	SurfacePolarity polarity,
+	const std::string& contextMessage)
+{
+	if (!tool) {
+		return true;
+	}
+
+	cVector3d toolPos;
+	{
+		std::lock_guard<std::mutex> lock(g_sceneMutex);
+		toolPos = tool->getDeviceGlobalPos();
+	}
+
+	cVector3d leftPos, rightPos;
+	computeCubeBasePositionsForDirection(direction, leftPos, rightPos);
+	cVector3d axis = getAxisForDirection(direction);
+	if (axis.lengthsq() > 0.0) {
+		const double polaritySign = (polarity == SurfacePolarity::POSITIVE) ? 1.0 : -1.0;
+		const cVector3d shift = axis * (kSurfacePolarityOffset * polaritySign);
+		leftPos += shift;
+		rightPos += shift;
+	}
+
+	const cVector3d halfExtents = getCubeHalfExtents(direction);
+	const bool safeLeft = !isPointInsideBox(toolPos, leftPos, halfExtents, kSurfaceChangeSafetyMargin);
+	const bool safeRight = !isPointInsideBox(toolPos, rightPos, halfExtents, kSurfaceChangeSafetyMargin);
+	const bool safe = safeLeft && safeRight;
+
+	if (!safe) {
+		std::cout << "[Safety] ";
+		if (!contextMessage.empty()) {
+			std::cout << contextMessage << ": ";
+		}
+		std::cout << "move the tool cursor away from both cubes before switching orientation/polarity."
+			<< std::endl;
+	}
+	return safe;
+}
+
 // a few objects that are placed in the scene
 cMesh* base;
 cMesh* box;
@@ -992,11 +1179,7 @@ int main(int argc, char* argv[])
 	camera = new cCamera(world);
 	world->addChild(camera);
 
-	// position and orient the camera
-	camera->set(cVector3d(0.2, 0.05, 0.15),    // camera position (eye)
-		cVector3d(0.0, 0.0, 0.015),    // lookat position (target)
-		cVector3d(0.0, 0.0, 1.0));   // direction of the (up) vector
-
+applyDefaultCameraView();
 	// set the near and far clipping planes of the camera
 	// anything in front or behind these clipping planes will not be rendered
 	camera->setClippingPlanes(0.01, 10.0);
@@ -1117,14 +1300,14 @@ int main(int argc, char* argv[])
 
 
 	/////////////////////////////////////////////////////////////////////////
-	// BASE
+	// BASEbase
 	/////////////////////////////////////////////////////////////////////////
 
 	// create a mesh
 	cMesh* base = new cMesh();
 
 	// add object to world
-	//world->addChild(base);
+	world->addChild(base);
 
 	// build mesh using a cylinder primitive
 	cCreateCylinder(base,
@@ -1313,7 +1496,7 @@ int main(int argc, char* argv[])
 	leftCube = new cMesh();
 	world->addChild(leftCube);
 	// ?????????????,???Z??(???)
-	cCreateBox(leftCube, 0.03, 0.03, kCubeFaceThickness);
+	cCreateBox(leftCube, kCubeFaceLength, kCubeFaceWidth, kCubeFaceThickness);
 	leftCube->setLocalPos( 0.04, -0.02, 0.05);
 	leftCube->m_material->setBlueRoyal();
 	leftCube->m_material->setStiffness(1000);
@@ -1327,7 +1510,7 @@ int main(int argc, char* argv[])
 	// ???? - ????
 	rightCube = new cMesh();
 	world->addChild(rightCube);
-	cCreateBox(rightCube, 0.03, 0.03, kCubeFaceThickness);
+	cCreateBox(rightCube, kCubeFaceLength, kCubeFaceWidth, kCubeFaceThickness);
 	rightCube->setLocalPos( 0.04, 0.04, 0.05);
 	rightCube->m_material->setBlueRoyal();
 	rightCube->m_material->setStiffness(1200);
@@ -1340,7 +1523,7 @@ int main(int argc, char* argv[])
 	}
 
 	leftCubeHighlight = new cMesh();
-	cCreateBox(leftCubeHighlight, 0.03, 0.03, kHighlightThickness);
+	cCreateBox(leftCubeHighlight, kCubeFaceLength, kCubeFaceWidth, kHighlightThickness);
 	leftCubeHighlight->m_material->m_ambient = kHighlightColor;
 	leftCubeHighlight->m_material->m_diffuse = kHighlightColor;
 	leftCubeHighlight->setUseTransparency(false);
@@ -1348,45 +1531,17 @@ int main(int argc, char* argv[])
 	world->addChild(leftCubeHighlight);
 
 	rightCubeHighlight = new cMesh();
-	cCreateBox(rightCubeHighlight, 0.03, 0.03, kHighlightThickness);
+	cCreateBox(rightCubeHighlight, kCubeFaceLength, kCubeFaceWidth, kHighlightThickness);
 	rightCubeHighlight->m_material->m_ambient = kHighlightColor;
-	rightCubeHighlight->m_material->m_diffuse = kHighlightColor;
-	rightCubeHighlight->setUseTransparency(false);
-	rightCubeHighlight->setEnabled(false);
-	world->addChild(rightCubeHighlight);
+rightCubeHighlight->m_material->m_diffuse = kHighlightColor;
+rightCubeHighlight->setUseTransparency(false);
+rightCubeHighlight->setEnabled(false);
+world->addChild(rightCubeHighlight);
 
-	directionArrow = new cShapeLine(cVector3d(0, 0, 0), cVector3d(0, 0, kArrowLength));
-	directionArrow->m_colorPointA.setRed();
-	directionArrow->m_colorPointB.setRed();
-	directionArrow->setLineWidth(6);
-	directionArrow->setLocalPos(cVector3d(0.0, 0.0, 0.02));
-	directionArrow->setEnabled(false);
-	world->addChild(directionArrow);
-
-	cMatrix3d arrowHeadRot;
-	arrowHeadRot.identity();
-	directionArrowHead = new cMesh();
-	cCreateCone(directionArrowHead,
-		kArrowHeadRadius,
-		0.0,
-		kArrowHeadHeight,
-		20,
-		1,
-		1,
-		true,
-		true,
-		cVector3d(0, 0, 0),
-		arrowHeadRot);
-	directionArrowHead->m_material->m_ambient = kHighlightColor;
-	directionArrowHead->m_material->m_diffuse = kHighlightColor;
-	directionArrowHead->setUseTransparency(false);
-	directionArrowHead->setEnabled(false);
-	world->addChild(directionArrowHead);
-
-	// Experiment 2 planes (visible/invisible)
-	g_exp2VisiblePlane = new cMesh();
-	world->addChild(g_exp2VisiblePlane);
-	cCreateBox(g_exp2VisiblePlane, kExp2PlaneHeight, kExp2PlaneThickness, kExp2PlaneWidth);
+// Experiment 2 planes (visible/invisible)
+g_exp2VisiblePlane = new cMesh();
+world->addChild(g_exp2VisiblePlane);
+cCreateBox(g_exp2VisiblePlane, kExp2PlaneHeight, kExp2PlaneThickness, kExp2PlaneWidth);
 	g_exp2VisiblePlane->setLocalPos(kExp2PlaneCenter);
 	g_exp2VisiblePlane->m_material->setRedDark();
 	g_exp2VisiblePlane->setUseDisplayList(true);
@@ -1786,6 +1941,17 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 				return;
 			}
 
+			FeedbackDirection nextDirection;
+			SurfacePolarity nextPolarity;
+			if (!userStudy->peekNextTrialSurface(nextDirection, nextPolarity)) {
+				std::cout << "No upcoming trial configuration available." << std::endl;
+				return;
+			}
+
+			if (!ensureToolClearForSurfaceChange(nextDirection, nextPolarity, "starting the next trial")) {
+				return;
+			}
+
 			// ?????
 			userStudy->startNextTrial();
 
@@ -1882,6 +2048,12 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 	{
 		// Mode 1 (F-P), Direction 1 (X)
 		if (userStudy) {
+			if (!ensureToolClearForSurfaceChange(
+				FeedbackDirection::LATERAL_X,
+				SurfacePolarity::POSITIVE,
+				"changing manual group")) {
+				return;
+			}
 			userStudy->setManualTrialGroup(InteractionMode::FORCE_TO_POSITION, FeedbackDirection::LATERAL_X);
 			userStudy->resetCurrentGroup();
 			updateSurfaceOrientation(FeedbackDirection::LATERAL_X);
@@ -1896,6 +2068,12 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 	{
 		// Mode 1 (F-P), Direction 2 (Y)
 		if (userStudy) {
+			if (!ensureToolClearForSurfaceChange(
+				FeedbackDirection::LATERAL_Y,
+				SurfacePolarity::POSITIVE,
+				"changing manual group")) {
+				return;
+			}
 			userStudy->setManualTrialGroup(InteractionMode::FORCE_TO_POSITION, FeedbackDirection::LATERAL_Y);
 			userStudy->resetCurrentGroup();
 			updateSurfaceOrientation(FeedbackDirection::LATERAL_Y);
@@ -1910,6 +2088,12 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 	{
 		// Mode 1 (F-P), Direction 3 (Z)
 		if (userStudy) {
+			if (!ensureToolClearForSurfaceChange(
+				FeedbackDirection::VERTICAL_Z,
+				SurfacePolarity::POSITIVE,
+				"changing manual group")) {
+				return;
+			}
 			userStudy->setManualTrialGroup(InteractionMode::FORCE_TO_POSITION, FeedbackDirection::VERTICAL_Z);
 			userStudy->resetCurrentGroup();
 			updateSurfaceOrientation(FeedbackDirection::VERTICAL_Z);
@@ -1924,6 +2108,12 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 	{
 		// Mode 2 (F-F), Direction 1 (X)
 		if (userStudy) {
+			if (!ensureToolClearForSurfaceChange(
+				FeedbackDirection::LATERAL_X,
+				SurfacePolarity::POSITIVE,
+				"changing manual group")) {
+				return;
+			}
 			userStudy->setManualTrialGroup(InteractionMode::FORCE_TO_FORCE, FeedbackDirection::LATERAL_X);
 			userStudy->resetCurrentGroup();
 			updateSurfaceOrientation(FeedbackDirection::LATERAL_X);
@@ -1938,6 +2128,12 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 	{
 		// Mode 2 (F-F), Direction 2 (Y)
 		if (userStudy) {
+			if (!ensureToolClearForSurfaceChange(
+				FeedbackDirection::LATERAL_Y,
+				SurfacePolarity::POSITIVE,
+				"changing manual group")) {
+				return;
+			}
 			userStudy->setManualTrialGroup(InteractionMode::FORCE_TO_FORCE, FeedbackDirection::LATERAL_Y);
 			userStudy->resetCurrentGroup();
 			updateSurfaceOrientation(FeedbackDirection::LATERAL_Y);
@@ -1952,6 +2148,12 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 	{
 		// Mode 2 (F-F), Direction 3 (Z)
 		if (userStudy) {
+			if (!ensureToolClearForSurfaceChange(
+				FeedbackDirection::VERTICAL_Z,
+				SurfacePolarity::POSITIVE,
+				"changing manual group")) {
+				return;
+			}
 			userStudy->setManualTrialGroup(InteractionMode::FORCE_TO_FORCE, FeedbackDirection::VERTICAL_Z);
 			userStudy->resetCurrentGroup();
 			updateSurfaceOrientation(FeedbackDirection::VERTICAL_Z);
@@ -2417,7 +2619,6 @@ void updateHaptics(void)
 	// main haptic simulation loop
 	while (simulationRunning)
 	{
-		std::lock_guard<std::mutex> sceneLock(g_sceneMutex);
 		/////////////////////////////////////////////////////////////////////////
 		// HAPTIC RENDERING
 		/////////////////////////////////////////////////////////////////////////
@@ -2425,10 +2626,7 @@ void updateHaptics(void)
 		// signal frequency counter
 		freqCounterHaptics.signal(1);
 
-		processPendingExp2AnglesLocked();
-
-		// compute global reference frames for each object
-		world->computeGlobalPositions(true);
+		// compute global reference frames for each object (inside scene lock below)
 
 		// update position and orientation of tool
 
@@ -2491,7 +2689,8 @@ void updateHaptics(void)
 
 
 
-		sphereTarget->setLocalPos(TrajTarget);
+		// cache target so scene update section can touch scene quickly
+		cVector3d targetToPlace = TrajTarget;
 
 
 		/////////////////////////////////////////////////////////////////////////
@@ -2622,10 +2821,16 @@ void updateHaptics(void)
 		// ??????
 
 		// ??tool??
-		tool->setDeviceLocalPos(posFrM);
-		tool->setDeviceLocalRot(rotFrM);
-		tool->updateToolImagePosition();
-		tool->computeInteractionForces();
+		{
+			std::lock_guard<std::mutex> sceneLock(g_sceneMutex);
+			processPendingExp2AnglesLocked();
+			world->computeGlobalPositions(true);
+			sphereTarget->setLocalPos(targetToPlace);
+			tool->setDeviceLocalPos(posFrM);
+			tool->setDeviceLocalRot(rotFrM);
+			tool->updateToolImagePosition();
+			tool->computeInteractionForces();
+		}
 
 
 
@@ -3282,7 +3487,7 @@ void updateExperimentLabels()
 
 		case ExperimentState::IN_PROGRESS:
 			instructions += "Trial in progress\n";
-			instructions += "Touch only the red-highlighted face indicated by the central arrow (" + polStr + ", along " + dirStr + ")\n";
+			instructions += "Touch only the red-highlighted face (" + polStr + ", along " + dirStr + ")\n";
 			instructions += "Press '1' for LEFT surface stiffer, '2' for RIGHT surface stiffer\n";
 			break;
 
@@ -3303,7 +3508,7 @@ void updateExperimentLabels()
 			break;
 		}
 
-		instructions += "\nSurface orientation: " + polStr + " (follow the central arrow)\n";
+		instructions += "\nSurface orientation: " + polStr + "\n";
 		instructions += "Contact only the red-highlighted surface shifted along " + dirStr + "\n";
 		instructions += "\nManual Mode: Press 5-9,0 to jump to specific groups";
 		instructions += "\nPress 'E' to exit experiment mode";
@@ -3326,7 +3531,7 @@ void updateExperimentLabels()
 
 		std::string modeStr = (userStudy->getCurrentMode() == InteractionMode::FORCE_TO_POSITION) ? "F-P" : "F-F";
 
-		trialInfo += "Mode: " + modeStr + " | Direction: " + dirStr + " | Surface: " + polStr + " (arrow)";
+		trialInfo += "Mode: " + modeStr + " | Direction: " + dirStr + " | Surface: " + polStr;
 
 		labelTrialInfo->setText(trialInfo);
 		labelTrialInfo->m_fontColor.setBlack();
@@ -3337,59 +3542,27 @@ void updateExperimentLabels()
 	}
 }
 // ???????????
-namespace {
-void rebuildHighlightMesh(cMesh* mesh, FeedbackDirection direction)
-{
-	if (!mesh) return;
-	mesh->clear();
-	switch (direction) {
-		case FeedbackDirection::LATERAL_X:
-			cCreateBox(mesh, kHighlightThickness, 0.03, 0.03);
-			break;
-		case FeedbackDirection::LATERAL_Y:
-			cCreateBox(mesh, 0.03, kHighlightThickness, 0.03);
-			break;
-	case FeedbackDirection::VERTICAL_Z:
-	default:
-		cCreateBox(mesh, 0.03, 0.03, kHighlightThickness);
-		break;
-	}
-	mesh->m_material->m_ambient = kHighlightColor;
-	mesh->m_material->m_diffuse = kHighlightColor;
-	mesh->setUseTransparency(false);
-}
 
-cMatrix3d computeArrowRotation(const cVector3d& direction)
-{
-	cMatrix3d rot;
-	rot.identity();
-	cVector3d dir = direction;
-	double len = dir.length();
-	if (len < 1e-9) {
-		return rot;
-	}
-	dir /= len;
-	const cVector3d base(0.0, 0.0, 1.0);
-	double dot = cClamp(base.dot(dir), -1.0, 1.0);
-	double angle = acos(dot);
-	if (angle < 1e-6) {
-		return rot;
-	}
-	cVector3d axis;
-	cCross(axis, base);
-	if (axis.lengthsq() < 1e-9) {
-		axis = cVector3d(1.0, 0.0, 0.0);
-	}
-	axis.normalize();
-	rot.setAxisAngleRotationRad(axis, angle);
-	return rot;
-}
-}
 
 void rebuildHighlightMeshes(FeedbackDirection direction)
 {
 	rebuildHighlightMesh(leftCubeHighlight, direction);
 	rebuildHighlightMesh(rightCubeHighlight, direction);
+}
+
+void updateCubeBasePositions(FeedbackDirection direction)
+{
+	if (!leftCube || !rightCube) return;
+
+	cVector3d leftPos, rightPos;
+	computeCubeBasePositionsForDirection(direction, leftPos, rightPos);
+
+	g_leftCubeBasePos = leftPos;
+	g_rightCubeBasePos = rightPos;
+
+	leftCube->setLocalPos(leftPos);
+	rightCube->setLocalPos(rightPos);
+	g_cubeBaseInitialized = true;
 }
 
 void updateSurfaceOrientation(FeedbackDirection direction)
@@ -3398,6 +3571,8 @@ void updateSurfaceOrientation(FeedbackDirection direction)
 	if (!leftCube || !rightCube) return;
 
 	g_activeSurfaceDirection = direction;
+	updateCubeBasePositions(direction);
+	updateExperimentCamera(direction);
 
 	// ????????
 	leftCube->clear();
@@ -3407,20 +3582,20 @@ void updateSurfaceOrientation(FeedbackDirection direction)
 	switch (direction) {
 	case FeedbackDirection::LATERAL_X:
 		// X?? - ???,???X?
-		cCreateBox(leftCube, kCubeFaceThickness, 0.03, 0.03);
-		cCreateBox(rightCube, kCubeFaceThickness, 0.03, 0.03);
+		cCreateBox(leftCube, kCubeFaceThickness, kCubeFaceLength, kCubeFaceWidth);
+		cCreateBox(rightCube, kCubeFaceThickness, kCubeFaceLength, kCubeFaceWidth);
 		break;
 
 	case FeedbackDirection::LATERAL_Y:
 		// Y?? - ???,???Y?
-		cCreateBox(leftCube, 0.03, kCubeFaceThickness, 0.03);
-		cCreateBox(rightCube, 0.03, kCubeFaceThickness, 0.03);
+		cCreateBox(leftCube, kCubeFaceLength, kCubeFaceThickness, kCubeFaceWidth);
+		cCreateBox(rightCube, kCubeFaceLength, kCubeFaceThickness, kCubeFaceWidth);
 		break;
 
 	case FeedbackDirection::VERTICAL_Z:
 		// Z?? - ???,???Z?
-		cCreateBox(leftCube, 0.03, 0.03, kCubeFaceThickness);
-		cCreateBox(rightCube, 0.03, 0.03, kCubeFaceThickness);
+		cCreateBox(leftCube, kCubeFaceLength, kCubeFaceWidth, kCubeFaceThickness);
+		cCreateBox(rightCube, kCubeFaceLength, kCubeFaceWidth, kCubeFaceThickness);
 		break;
 	}
 
@@ -3468,29 +3643,6 @@ void applySurfacePolarity(SurfacePolarity polarity)
 	if (rightCubeHighlight) {
 		rightCubeHighlight->setLocalPos(rightCube->getLocalPos() + faceOffset);
 		rightCubeHighlight->setEnabled(true);
-	}
-
-	cVector3d arrowDir = axis * polaritySign;
-	double arrowLen = arrowDir.length();
-	if (directionArrow && arrowLen > 1e-9) {
-		cVector3d arrowDirNorm = arrowDir / arrowLen;
-		directionArrow->m_pointA = cVector3d(0.0, 0.0, 0.0);
-		directionArrow->m_pointB = arrowDirNorm * kArrowLength;
-		directionArrow->setEnabled(true);
-
-	} else if (directionArrow) {
-		directionArrow->setEnabled(false);
-	}
-
-	if (directionArrowHead && arrowLen > 1e-9) {
-		cVector3d arrowDirNorm = arrowDir / arrowLen;
-		cVector3d arrowOrigin = directionArrow ? directionArrow->getLocalPos() : cVector3d(0.0, 0.0, 0.0);
-		cVector3d headPos = arrowOrigin + arrowDirNorm * (kArrowLength + kArrowHeadHeight * 0.5);
-		directionArrowHead->setLocalPos(headPos);
-		directionArrowHead->setLocalRot(computeArrowRotation(arrowDirNorm));
-		directionArrowHead->setEnabled(true);
-	} else if (directionArrowHead) {
-		directionArrowHead->setEnabled(false);
 	}
 }
 

@@ -89,6 +89,7 @@ public:
     bool isTrialActive() const { return m_trialActive; }
     InteractionMode getCurrentMode() const { return m_currentMode; }
     FeedbackDirection getCurrentDirection() const { return m_currentDirection; }
+    bool peekNextTrialSurface(FeedbackDirection& direction, SurfacePolarity& polarity) const;
 
     /* --- 实验控制 ------------------------------------------------------- */
     void initializeTrials();

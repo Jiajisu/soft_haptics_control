@@ -567,6 +567,38 @@ void UserStudyManager::startNextTrial()
         << std::endl;
 }
 
+bool UserStudyManager::peekNextTrialSurface(FeedbackDirection& direction, SurfacePolarity& polarity) const
+{
+	if (!m_sequenceLoaded || m_experimentSequence.empty()) {
+		return false;
+	}
+
+	int groupIndex = m_currentTrialGroup;
+	int trialIndex = m_currentTrialInGroup;
+
+	if (trialIndex >= 110) {
+		trialIndex = 0;
+		groupIndex++;
+	}
+
+	if (groupIndex < 0 || groupIndex >= static_cast<int>(m_experimentSequence.size())) {
+		return false;
+	}
+
+	const auto& group = m_experimentSequence[groupIndex];
+	if (group.trials.empty()) {
+		return false;
+	}
+
+	if (trialIndex < 0 || trialIndex >= static_cast<int>(group.trials.size())) {
+		return false;
+	}
+
+	direction = group.direction;
+	polarity = group.trials[trialIndex].polarity;
+	return true;
+}
+
 // ?? recordUserChoice ??
 void UserStudyManager::recordUserChoice(int choice)
 {
