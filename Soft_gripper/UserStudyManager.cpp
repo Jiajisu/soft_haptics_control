@@ -17,6 +17,12 @@ SurfacePolarity polarityFromInt(int v) {
 std::string polarityToString(SurfacePolarity p) {
     return (p == SurfacePolarity::POSITIVE) ? "positive" : "negative";
 }
+
+const std::vector<double> kExp2Angles = { -90.0, -60.0, -30.0, 0.0, 30.0, 60.0 };
+constexpr int kExp2Repetitions = 5;
+inline size_t getExp2ExpectedTrialCountInternal() {
+    return kExp2Angles.size() * kExp2Angles.size() * kExp2Repetitions;
+}
 }
 
 UserStudyManager::UserStudyManager()
@@ -25,7 +31,7 @@ UserStudyManager::UserStudyManager()
     , m_currentDirection(FeedbackDirection::LATERAL_X)
     , m_currentTrialGroup(0)
     , m_currentTrialInGroup(0)
-    , m_referenceStiffness(1000.0)
+    , m_referenceStiffness(100.0)
     , m_sequenceLoaded(false)
     , m_experimentState(ExperimentState::NOT_STARTED)
     , m_csvFileReady(false)
@@ -172,15 +178,14 @@ std::vector<TrialConfig> UserStudyManager::generateRandomizedTrials()
 void UserStudyManager::generateExp2Sequence()
 {
     m_exp2Sequence.clear();
-    const std::vector<double> angles = { 0.0, 30.0, 60.0, 90.0, 120.0, 150.0 };
     std::vector<AngleTrialConfig> combos;
-    for (double ax : angles) {
-        for (double az : angles) {
+    for (double ax : kExp2Angles) {
+        for (double az : kExp2Angles) {
             combos.push_back({ ax, az });
         }
     }
 
-    for (int rep = 0; rep < 5; ++rep) {
+    for (int rep = 0; rep < kExp2Repetitions; ++rep) {
         m_exp2Sequence.insert(m_exp2Sequence.end(), combos.begin(), combos.end());
     }
 
@@ -389,7 +394,7 @@ bool UserStudyManager::loadExp2Sequence(const std::string& filename)
     while (file >> ax >> az) {
         m_exp2Sequence.push_back({ ax, az });
     }
-    m_exp2SequenceLoaded = (m_exp2Sequence.size() == 180);
+    m_exp2SequenceLoaded = (m_exp2Sequence.size() == getExp2ExpectedTrialCountInternal());
     return m_exp2SequenceLoaded;
 }
 
@@ -859,6 +864,11 @@ double UserStudyManager::getExp2TargetAngleX() const
 double UserStudyManager::getExp2TargetAngleZ() const
 {
     return m_exp2CurrentTrial.targetAngleZ;
+}
+
+int UserStudyManager::getExp2ExpectedTrialCount() const
+{
+    return static_cast<int>(getExp2ExpectedTrialCountInternal());
 }
 
 void UserStudyManager::createOrLoadUserCSV()

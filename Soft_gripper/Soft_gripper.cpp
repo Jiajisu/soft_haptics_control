@@ -56,12 +56,17 @@ bool experimentMode = false;  // ?????????
 // ???????????
 cMesh* leftCube = nullptr;
 cMesh* rightCube = nullptr;
+cMesh* base = nullptr;
+cMesh* box = nullptr;
+cMesh* sphere = nullptr;
+cMesh* cone = nullptr;
+cMultiSegment* segments = nullptr;
 const cVector3d kDefaultLeftCubeBasePos(0.00, -0.05, 0.12);
 const cVector3d kDefaultRightCubeBasePos(0.00, 0.05, 0.12);
-const cVector3d kLateralXLeftCubeBasePos(0.00, -0.05, 0.05);
-const cVector3d kLateralXRightCubeBasePos(0.00, 0.05, 0.05);
-const cVector3d kLateralYLeftCubeBasePos(0.00, 0.0, 0.12);
-const cVector3d kLateralYRightCubeBasePos(0.00, 0.0, 0.04);
+const cVector3d kLateralXLeftCubeBasePos(0.00, -0.05, 0.04);
+const cVector3d kLateralXRightCubeBasePos(0.00, 0.05, 0.04);
+const cVector3d kLateralYLeftCubeBasePos(0.00, 0.0, 0.10);
+const cVector3d kLateralYRightCubeBasePos(0.00, 0.0, 0.02);
 static cVector3d g_leftCubeBasePos = kDefaultLeftCubeBasePos;
 static cVector3d g_rightCubeBasePos = kDefaultRightCubeBasePos;
 static bool g_cubeBaseInitialized = false;
@@ -69,6 +74,7 @@ const double kSurfacePolarityOffset = 0.04;
 static FeedbackDirection g_activeSurfaceDirection = FeedbackDirection::VERTICAL_Z;
 cMesh* g_exp2VisiblePlane = nullptr;
 cMesh* g_exp2HiddenPlane = nullptr;
+cMesh* g_exp2BaseBox = nullptr;
 bool g_exp2PlaneInitialized = false;
 std::atomic<double> g_exp2PendingAngleX{ 0.0 };
 std::atomic<double> g_exp2PendingAngleZ{ 0.0 };
@@ -188,22 +194,34 @@ cLabel* labelExp2Debug = nullptr;
 const cVector3d kDefaultCameraPos(0.2, 0.05, 0.15);
 const cVector3d kDefaultCameraLook(0.0, 0.0, 0.015);
 const cVector3d kDefaultCameraUp(0.0, 0.0, 1.0);
-const cVector3d kCameraPosX(0.001, 0.0, 0.28);
-const cVector3d kCameraLookX(0.002, 0.0, 0.10);
-const cVector3d kCameraUpX(0.0, 0.0, -1.0);
-const cVector3d kCameraPosY(0.2, 0.0, 0.22);
-const cVector3d kCameraLookY(0.0, 0.0, 0.06);
+//const cVector3d kCameraPosX(0.001, 0.0, 0.28);
+//const cVector3d kCameraLookX(0.002, 0.0, 0.10);
+//const cVector3d kCameraUpX(0.0, 0.0, -1.0);
+
+const cVector3d kCameraPosX(0.25, -0.015, 0.16);
+const cVector3d kCameraLookX(0.0, 0.0, 0.04);
+const cVector3d kCameraUpX(0.0, 0.0, 1.0);
+
+const cVector3d kCameraPosY(0.25, 0.0, 0.18);
+const cVector3d kCameraLookY(0.0, 0.0, 0.04);
 const cVector3d kCameraUpY(0.0, 0.0, 1.0);
+
 const cVector3d kCameraPosZ(0.25, 0.0, 0.12);
 const cVector3d kCameraLookZ(0.05, 0.0, 0.12);
 const cVector3d kCameraUpZ(0.0, 0.0, 1.0);
+const cVector3d kExp2CameraPos(0.2, 0.05, 0.08);
+const cVector3d kExp2CameraLook(0.0, 0.0, 0.05);
+const cVector3d kExp2CameraUp(0.0, 0.0, 1.0);
 const double kExp2PlaneWidth = 0.08;
 const double kExp2PlaneHeight = 0.08;
 const double kExp2PlaneThickness = 0.0008;
-const cVector3d kExp2PlaneCenter(0.0, 0.0, 0.03);
+const cVector3d kExp2PlaneCenter(0.0, 0.0, 0.02);
+const double kExp2VisiblePlaneWidth = 0.04;
+const double kExp2VisiblePlaneHeight = 0.04;
+const cVector3d kExp2VisiblePlaneCenter(0.0, 0.0, 0.08);
 const double kExp2AngleStepDeg = 10.0;
-const double kExp2MinAngleDeg = 0.0;
-const double kExp2MaxAngleDeg = 180.0;
+const double kExp2MinAngleDeg = -90.0;
+const double kExp2MaxAngleDeg = 60.0;
 double g_exp2UserAngleX = 0.0;
 double g_exp2UserAngleZ = 0.0;
 double g_exp2TargetAngleX = 0.0;
@@ -217,6 +235,7 @@ void applySurfacePolarity(SurfacePolarity polarity);
 void rebuildHighlightMeshes(FeedbackDirection direction);
 void updateCubeBasePositions(FeedbackDirection direction);
 void applyDefaultCameraView();
+void applyExp2CameraView();
 void updateExperimentCamera(FeedbackDirection direction);
 void showExperiment2Objects(bool show);
 extern bool hasInitPress;
@@ -263,10 +282,14 @@ void showExperimentObjects(bool show)
 	{
 		std::lock_guard<std::mutex> lock(g_sceneMutex);
 		// ??/???????
+		if (base) base->setEnabled(show);
 		if (leftCube) leftCube->setEnabled(show);
 		if (rightCube) rightCube->setEnabled(show);
 		if (leftCubeHighlight) leftCubeHighlight->setEnabled(show);
 		if (rightCubeHighlight) rightCubeHighlight->setEnabled(show);
+		if (axisX) axisX->setEnabled(show);
+		if (axisY) axisY->setEnabled(show);
+		if (axisZ) axisZ->setEnabled(show);
 
 		// ??/??????
 		if (labelExperimentInstructions) labelExperimentInstructions->setEnabled(show);
@@ -288,6 +311,11 @@ void setCameraView(const cVector3d& eye, const cVector3d& look, const cVector3d&
 void applyDefaultCameraView()
 {
 	setCameraView(kDefaultCameraPos, kDefaultCameraLook, kDefaultCameraUp);
+}
+
+void applyExp2CameraView()
+{
+	setCameraView(kExp2CameraPos, kExp2CameraLook, kExp2CameraUp);
 }
 
 void updateExperimentCamera(FeedbackDirection direction)
@@ -313,7 +341,13 @@ void updateExperimentCamera(FeedbackDirection direction)
 void showExperiment2Objects(bool show)
 {
 	std::lock_guard<std::mutex> lock(g_sceneMutex);
+	if (base) base->setEnabled(show);
+	if (g_exp2BaseBox) g_exp2BaseBox->setEnabled(show);
 	if (g_exp2VisiblePlane) g_exp2VisiblePlane->setEnabled(show);
+	// Keep coordinate axes visible during Experiment 2 for reference
+	if (axisX) axisX->setEnabled(show);
+	if (axisY) axisY->setEnabled(show);
+	if (axisZ) axisZ->setEnabled(show);
 
 	if (g_exp2HiddenPlane) {
 		g_exp2HiddenPlane->setEnabled(show);
@@ -387,6 +421,21 @@ bool startNextExp2Trial()
 	g_exp2UserAngleZ = 0.0;
 	g_exp2ActiveTrialNumber = userStudy->getExp2CurrentTrialIndex();
 	g_exp2TrialStartTime = std::chrono::steady_clock::now();
+
+	// Ensure hidden/visible planes have non-zero stiffness so collisions generate force.
+	double exp2Stiffness = userStudy->getReferenceStiffness();
+	{
+		std::lock_guard<std::mutex> lock(g_sceneMutex);
+		if (g_exp2HiddenPlane) {
+			g_exp2HiddenPlane->m_material->setStiffness(exp2Stiffness);
+			g_exp2HiddenPlane->setHapticEnabled(true);
+		}
+		if (g_exp2VisiblePlane) {
+			g_exp2VisiblePlane->m_material->setStiffness(exp2Stiffness);
+			g_exp2VisiblePlane->setHapticEnabled(true);
+		}
+	}
+
 	applyExp2TargetAngles();
 	applyExp2UserAngles();
 	flushPendingExp2Angles();
@@ -437,7 +486,7 @@ void updateExperiment2Labels(const std::string& status)
 	if (labelTrialInfo) {
 		std::ostringstream info;
 		int total = userStudy->getExp2TotalTrials();
-		if (total <= 0) total = 180;
+		if (total <= 0) total = userStudy->getExp2ExpectedTrialCount();
 		int displayTrial = userStudy->getExp2CurrentTrialIndex();
 		if (userStudy->isExp2TrialActive() && g_exp2ActiveTrialNumber >= 0) {
 			displayTrial = g_exp2ActiveTrialNumber;
@@ -535,8 +584,9 @@ void activateExperimentMode(ExperimentType type)
 	showOriginalObjects(false);
 
 	if (type == ExperimentType::EXPERIMENT1) {
-		showExperimentObjects(true);
+		// Hide Experiment 2 meshes first so shared objects (base) stay enabled for Exp1
 		showExperiment2Objects(false);
+		showExperimentObjects(true);
 		experimentMode = true;
 		g_activeExperiment = ExperimentType::EXPERIMENT1;
 		updateSurfaceOrientation(userStudy->getCurrentDirection());
@@ -552,7 +602,7 @@ void activateExperimentMode(ExperimentType type)
 		g_exp2DebugMode = false;
 		showExperiment2Objects(true);
 		experimentMode = false;
-		applyDefaultCameraView();
+		applyExp2CameraView();
 		g_activeExperiment = ExperimentType::EXPERIMENT2;
 		if (labelExperimentInstructions) labelExperimentInstructions->setEnabled(true);
 		if (labelTrialInfo) labelTrialInfo->setEnabled(true);
@@ -974,13 +1024,6 @@ bool ensureToolClearForSurfaceChange(FeedbackDirection direction,
 	return safe;
 }
 
-// a few objects that are placed in the scene
-cMesh* base;
-cMesh* box;
-cMesh* sphere;
-cMesh* cone;
-cMultiSegment* segments;
-
 // a colored background
 cBackground* background;
 
@@ -1319,25 +1362,36 @@ applyDefaultCameraView();
 	/////////////////////////////////////////////////////////////////////////
 
 	// create a mesh
-	cMesh* base = new cMesh();
+	base = new cMesh();
 
 	// add object to world
 	world->addChild(base);
 
+
+
 	// build mesh using a cylinder primitive
-	cCreateCylinder(base,
-		0.001,
-		0.09,
-		36,
-		1,
-		10,
-		true,
-		true,
-		cVector3d(0.0, 0.0, -0.001),
-		cMatrix3d(cDegToRad(0), cDegToRad(0), cDegToRad(0), C_EULER_ORDER_XYZ)
+	//cCreateCylinder(base,
+	//	0.001,
+	//	0.09,
+	//	36,
+	//	1,
+	//	10,
+	//	true,
+	//	true,
+	//	cVector3d(0.0, 0.0, -0.001),
+	//	cMatrix3d(cDegToRad(0), cDegToRad(0), cDegToRad(0), C_EULER_ORDER_XYZ)
+	//);
+
+	cCreateBox(base,
+		0.18,      // size along X axis (diameter of cylinder = 2 * 0.09)
+		0.18,      // size along Y axis (diameter of cylinder = 2 * 0.09)
+		0.002      // size along Z axis (height of cylinder = 0.001 * 2)
 	);
 
 	// set material properties
+
+	base->setLocalPos(cVector3d(0.0, 0.0, 0.0));
+
 	base->m_material->setBluePaleTurquoise();
 	base->m_material->setStiffness(0.5 * maxStiffness);
 	// build collision detection tree
@@ -1345,7 +1399,6 @@ applyDefaultCameraView();
 
 	// use display list to optimize graphic rendering performance
 	base->setUseDisplayList(true);
-
 
 	/////////////////////////////////////////////////////////////////////////
 	// BOX
@@ -1424,42 +1477,39 @@ applyDefaultCameraView();
 		cVector3d(0, 0, -0.05),
 		cMatrix3d(cDegToRad(0), cDegToRad(0), cDegToRad(0), C_EULER_ORDER_XYZ)
 	);
-	/////////////////////////////////////////////////////////////////////////
-    // Local Coordinate
-    /////////////////////////////////////////////////////////////////////////
-	// set material properties
-	cone->m_material->setBluePaleTurquoise();
-	cone->m_material->setStiffness(0.95 * maxStiffness);
 
-	// build collision detection tree
-	cone->createAABBCollisionDetector(toolRadius);
 
-	// use display list to optimize graphic rendering performance
-	cone->setUseDisplayList(true);
-
-	// ??:
+	// Axes for Experiment 1 visualization
 	axisX = new cShapeLine(
-		cVector3d(0, 0, 0),
-		cVector3d(10, 0, 0)
+		cVector3d(-0.09, -0.09, 0.002),
+		cVector3d(0.09, -0.09, 0.002)
 	);
-	axisX->m_material->setRedCrimson();
+	world->addChild(axisX);
+	axisX->m_colorPointA.setRed();
+	axisX->m_colorPointB.setRed();
+	axisX->setEnabled(false);
 
 	axisY = new cShapeLine(
-		cVector3d(0, 0, 0),
-		cVector3d(0, 0, 0)
+		cVector3d(-0.09, -0.09, 0.002),
+		cVector3d(-0.09, 0.09, 0.002)
 	);
-	axisY->m_material->setGreenForest();
+	world->addChild(axisY);
+	axisY->m_colorPointA.setGreenForest();
+	axisY->m_colorPointB.setGreenForest();
+	axisY->setEnabled(false);
 
 	axisZ = new cShapeLine(
-		cVector3d(0, 0, 0),
-		cVector3d(0, 0, 10)
+		cVector3d(-0.09, -0.09, 0),
+		cVector3d(-0.09, -0.09, 0.18)
 	);
-	axisZ->m_material->setBlueRoyal();
-
-	world->addChild(axisX);
-	world->addChild(axisY);
 	world->addChild(axisZ);
+	axisZ->m_colorPointA.setBlueRoyal();
+	axisZ->m_colorPointB.setBlueRoyal();
+	axisZ->setEnabled(false);
 
+	axisX->setLineWidth(4.0); // 线宽，单位像素
+	axisY->setLineWidth(4.0);
+	axisZ->setLineWidth(4.0);
 	//leftCube->setLocalPos( 0.02, -0.03, 0.04);
 	// ????????????
 	// 
@@ -1518,6 +1568,10 @@ applyDefaultCameraView();
 	leftCube->createAABBCollisionDetector(toolRadius);
 	leftCube->setUseDisplayList(true);
 	leftCube->setEnabled(false);
+	//leftCube->setUseTransparency(true);
+	//leftCube->m_material->setTransparencyLevel(0.5);
+
+
 	if (!g_cubeBaseInitialized) {
 		g_leftCubeBasePos = leftCube->getLocalPos();
 	}
@@ -1532,6 +1586,9 @@ applyDefaultCameraView();
 	rightCube->createAABBCollisionDetector(toolRadius);
 	rightCube->setUseDisplayList(true);
 	rightCube->setEnabled(false);
+	//rightCube->setUseTransparency(true);
+	//rightCube->m_material->setTransparencyLevel(0.5);
+
 	if (!g_cubeBaseInitialized) {
 		g_rightCubeBasePos = rightCube->getLocalPos();
 		g_cubeBaseInitialized = true;
@@ -1553,20 +1610,32 @@ applyDefaultCameraView();
 	rightCubeHighlight->setEnabled(false);
 	world->addChild(rightCubeHighlight);
 
+
+
 // Experiment 2 planes (visible/invisible)
 	g_exp2VisiblePlane = new cMesh();
 	world->addChild(g_exp2VisiblePlane);
-	cCreateBox(g_exp2VisiblePlane, kExp2PlaneHeight, kExp2PlaneThickness, kExp2PlaneWidth);
-	g_exp2VisiblePlane->setLocalPos(kExp2PlaneCenter);
+	cCreateBox(g_exp2VisiblePlane, kExp2VisiblePlaneHeight, kExp2PlaneThickness, kExp2VisiblePlaneWidth);
+	g_exp2VisiblePlane->setLocalPos(kExp2VisiblePlaneCenter);
 	g_exp2VisiblePlane->m_material->setRedDark();
 	g_exp2VisibleInitialRot = g_exp2VisiblePlane->getLocalRot();
 	g_exp2VisibleBaseRot = g_exp2VisibleInitialRot;
 	g_exp2VisiblePlane->setUseDisplayList(true);
 	g_exp2VisiblePlane->setEnabled(false);
 
+	// Visual cube at Exp2 center (no collision)
+	g_exp2BaseBox = new cMesh();
+	world->addChild(g_exp2BaseBox);
+	cCreateBox(g_exp2BaseBox, 0.04, 0.04, 0.04);
+	g_exp2BaseBox->setLocalPos(kExp2PlaneCenter);
+	g_exp2BaseBox->m_material->setGreenForest();
+	g_exp2BaseBox->setHapticEnabled(false);
+	g_exp2BaseBox->setEnabled(false);
+
 	g_exp2HiddenPlane = new cMesh();
 	world->addChild(g_exp2HiddenPlane);
-	cCreateBox(g_exp2HiddenPlane, kExp2PlaneHeight * 8, kExp2PlaneThickness , kExp2PlaneWidth * 8);
+	//cCreateBox(g_exp2HiddenPlane, kExp2PlaneHeight * 8, kExp2PlaneThickness , kExp2PlaneWidth * 8);
+	cCreateBox(g_exp2HiddenPlane, kExp2PlaneHeight, kExp2PlaneThickness, kExp2PlaneWidth);
 	g_exp2HiddenPlane->setLocalPos(kExp2PlaneCenter);
 	g_exp2HiddenPlane->m_material->setBlueRoyal();
 	g_exp2HiddenInitialRot = g_exp2HiddenPlane->getLocalRot();
@@ -3088,8 +3157,8 @@ if (experimentMode && userStudy && userStudy->isTrialActive()) {
 	cVector3d interactionForce = tool->getDeviceGlobalForce();
 
 	// scale force to tip displacement 
-	static const double forceToDisplacementScale = 0.00018; // 1N -> 0.18mm
-	cVector3d tipDisplacement = interactionForce * forceToDisplacementScale;
+	static const double forceToDisplacementScaleFD = 0.003; // 1N -> 2mm
+	cVector3d tipDisplacement = interactionForce * forceToDisplacementScaleFD;
 	
 	// tip initial pos 
 	static cVector3d baseTipPosition(0.0, 0.0, ResolvedRateControl.h_0 * 0.001);
@@ -3132,6 +3201,54 @@ if (experimentMode && userStudy && userStudy->isTrialActive()) {
 	}
 	else
 	{
+		presCurr = newPressure;
+	}
+
+}
+else if (g_activeExperiment == ExperimentType::EXPERIMENT2 &&
+	userStudy && userStudy->isExp2TrialActive()) {
+	// Experiment 2 uses the hidden plane's collision; reuse the same force->displacement mapping as Experiment 1.
+	if (!hasInitPress) {
+		presCurr = ResolvedRateControl.m_initPressure;
+		hasInitPress = true;
+		std::cout << "[EXP2] Initial pressure set to: " << presCurr.str() << std::endl;
+	}
+
+	/////////////////////////////////////////////////////////////////////////
+	// FORCE - DISPLACEMENT (same scale as Experiment 1)
+	/////////////////////////////////////////////////////////////////////////
+	cVector3d interactionForce = tool->getDeviceGlobalForce();
+
+	static const double forceToDisplacementScaleFF = 0.003; // 1N -> 2mm
+	cVector3d tipDisplacement = interactionForce * forceToDisplacementScaleFF;
+
+	static cVector3d baseTipPosition(0.0, 0.0, ResolvedRateControl.h_0 * 0.001);
+	cVector3d targetTipPosition = baseTipPosition + tipDisplacement;
+
+	cVector3d targetPosMM = targetTipPosition * 1000;
+	targetPosMM.set(
+		-targetPosMM.x() + 0.0001,
+		targetPosMM.y(),
+		targetPosMM.z()
+	);
+	static const double angle = 210.0 * M_PI / 180.0;
+	static cMatrix3d rotZ_120(
+		cos(angle), -sin(angle), 0.0,
+		sin(angle), cos(angle), 0.0,
+		0.0, 0.0, 1.0
+	);
+	cVector3d targetPosMM_rotated = rotZ_120 * targetPosMM;
+
+	auto result = ResolvedRateControl.updateMotion(presCurr, targetPosMM_rotated);
+	chai3d::cVector3d newPos = result[0];
+	chai3d::cVector3d newPressure = result[1];
+	double error = (newPos - targetPosMM_rotated).length();
+	if (error < 0.05) {
+		cVector3d PressuretoArduino = presCurr;
+		std::string sendStr = PressuretoArduino.str();
+		arduinoWriteData(50, sendStr);
+	}
+	else {
 		presCurr = newPressure;
 	}
 
@@ -3301,7 +3418,7 @@ void arduinoWriteData(unsigned int delay_time, const std::string& send_str)
 			}
 			// Then clamp to [-35, 35]
 			if (val < -40.0) val = -40.0;
-			if (val > 35.0) val = 35.0;
+			if (val > 40.0) val = 40.0;
 
 			values.push_back(val);
 		}
