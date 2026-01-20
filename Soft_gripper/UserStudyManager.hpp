@@ -13,6 +13,7 @@
 enum class InteractionMode { FORCE_TO_POSITION, FORCE_TO_FORCE };
 enum class FeedbackDirection { LATERAL_X, LATERAL_Y, VERTICAL_Z };
 enum class ExperimentType { NONE, EXPERIMENT1, EXPERIMENT2 };
+enum class Exp2Plane { PLANE_X, PLANE_Y, PLANE_Z };
 
 enum class ExperimentState {
     NOT_STARTED,      // 未开始
@@ -26,16 +27,15 @@ enum class ExperimentState {
 enum class SurfacePolarity { POSITIVE = 1, NEGATIVE = -1 };
 
 struct AngleTrialConfig {
-    double angleX;
-    double angleZ;
+    Exp2Plane plane;
+    double angleDeg; // 0-360, step 30
 };
 
 struct AngleTrialResult {
     int trialNumber;
-    double targetAngleX;
-    double targetAngleZ;
-    double userAngleX;
-    double userAngleZ;
+    Exp2Plane plane;
+    double targetAngleDeg;
+    double userAngleDeg;
     double durationSeconds;
     std::chrono::steady_clock::time_point trialStartTime;
     std::chrono::steady_clock::time_point confirmTime;
@@ -100,9 +100,16 @@ public:
     // Experiment 2 (angular discrimination)
     bool hasNextTrialExp2() const;
     void startNextTrialExp2();
-    void recordExp2UserAngles(double userAngleX, double userAngleZ, double durationSeconds);
-    double getExp2TargetAngleX() const;
-    double getExp2TargetAngleZ() const;
+    void recordExp2UserAngle(double userAngleDeg, double durationSeconds);
+    void recordExp2UserAngles(double userAngleX, double userAngleZ, double durationSeconds); // legacy shim
+    double getExp2TargetAngleDeg() const;
+    double getExp2TargetAngleX() const; // legacy shim
+    double getExp2TargetAngleZ() const; // legacy shim
+    Exp2Plane getExp2Plane() const { return m_exp2CurrentTrial.plane; }
+    void setManualExp2Group(Exp2Plane plane);
+    int getExp2TrialsPerGroup() const;
+    int getExp2GroupCount() const;
+    int getExp2CompletedTrials() const;
     double getReferenceStiffness() const { return m_referenceStiffness; }
     int getExp2CurrentTrialIndex() const { return m_exp2CurrentTrialIndex; }
     int getExp2TotalTrials() const { return static_cast<int>(m_exp2Sequence.size()); }
@@ -111,6 +118,7 @@ public:
     bool isExp2TrialActive() const { return m_exp2TrialActive; }
     bool isExp2BreakPending() const { return m_exp2NeedBreak; }
     void clearExp2BreakFlag() { m_exp2NeedBreak = false; }
+    int getExp1CompletedTrials() const;
 
     /* --- 刚度 ----------------------------------------------------------- */
     double getCurrentReferenceStiffness() const;
@@ -134,6 +142,7 @@ private:
     int m_currentTrialGroup;    // 0-5
     int m_currentTrialInGroup;  // 0-109
     SurfacePolarity m_currentPolarity;
+    std::vector<int> m_groupProgress; // per-group next trial index
 
     /* --- 刚度 ----------------------------------------------------------- */
     double m_referenceStiffness;
@@ -174,14 +183,24 @@ private:
     std::vector<AngleTrialConfig> m_exp2Sequence;
     bool m_exp2SequenceLoaded = false;
     int m_exp2CurrentTrialIndex = 0;
+    int m_exp2CurrentGroup = 0;
     bool m_exp2TrialActive = false;
     bool m_exp2NeedBreak = false;
+    std::vector<int> m_exp2GroupProgress; // per-group next trial index
     AngleTrialResult m_exp2CurrentTrial;
     std::vector<AngleTrialResult> m_exp2Results;
     std::chrono::steady_clock::time_point m_exp2TrialStart;
     void generateExp2Sequence();
     bool loadExp2Sequence(const std::string& filename);
     void saveExp2Sequence(const std::string& filename);
+    int findExp2GroupStartIndex(Exp2Plane plane) const;
+    bool isExp2SequenceGroupedByPlane() const;
+    void regroupExp2SequenceByPlane(bool shuffleWithinGroups);
+    void ensureExp2SequenceGrouped();
+    void ensureExp1GroupProgressSize();
+    void ensureExp2GroupProgressSize();
+    int getExp2GroupSize(int groupIdx) const;
+    int findNextExp2GroupWithRemaining(int startGroup) const;
 
 };
 

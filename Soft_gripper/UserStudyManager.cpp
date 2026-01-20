@@ -18,10 +18,16 @@ std::string polarityToString(SurfacePolarity p) {
     return (p == SurfacePolarity::POSITIVE) ? "positive" : "negative";
 }
 
-const std::vector<double> kExp2Angles = { -90.0, -60.0, -30.0, 0.0, 30.0, 60.0 };
+const std::array<Exp2Plane, 3> kExp2Planes = {
+    Exp2Plane::PLANE_X,
+    Exp2Plane::PLANE_Y,
+    Exp2Plane::PLANE_Z
+};
+const std::vector<double> kExp2AnglesDeg = { 0.0, 30.0, 60.0, 90.0, 120.0, 150.0, 180.0, 210.0, 240.0, 270.0, 300.0, 330.0 };
 constexpr int kExp2Repetitions = 5;
+const size_t kExp2TrialsPerGroup = kExp2AnglesDeg.size() * kExp2Repetitions;
 inline size_t getExp2ExpectedTrialCountInternal() {
-    return kExp2Angles.size() * kExp2Angles.size() * kExp2Repetitions;
+    return kExp2TrialsPerGroup * kExp2Planes.size();
 }
 }
 
@@ -39,6 +45,7 @@ UserStudyManager::UserStudyManager()
     , m_exp2State(ExperimentState::NOT_STARTED)
     , m_exp2SequenceLoaded(false)
     , m_exp2CurrentTrialIndex(0)
+    , m_exp2CurrentGroup(0)
     , m_exp2TrialActive(false)
     , m_exp2NeedBreak(false)
 {
@@ -83,6 +90,9 @@ bool UserStudyManager::loadOrCreateUserSession(const std::string& userId)
         generateExp2Sequence();
         saveExp2Sequence(getExp2SequenceFilename());
     }
+    ensureExp2SequenceGrouped();
+    ensureExp1GroupProgressSize();
+    ensureExp2GroupProgressSize();
 
     if (loadProgress(getProgressFilename())) {
         std::cout << "[UserStudy] Progress loaded: Exp1 Group "
@@ -95,6 +105,7 @@ bool UserStudyManager::loadOrCreateUserSession(const std::string& userId)
         m_currentTrialInGroup = 0;
         m_experimentState = ExperimentState::READY;
         m_exp2CurrentTrialIndex = 0;
+        m_exp2CurrentGroup = 0;
         m_exp2State = ExperimentState::READY;
         saveProgress();
     }
@@ -114,6 +125,11 @@ bool UserStudyManager::loadOrCreateUserSession(const std::string& userId)
     }
     else if (m_exp2State != ExperimentState::IN_PROGRESS) {
         m_exp2State = ExperimentState::READY;
+    }
+    ensureExp2GroupProgressSize();
+    int nextGroup = findNextExp2GroupWithRemaining(m_exp2CurrentGroup);
+    if (nextGroup >= 0) {
+        m_exp2CurrentGroup = nextGroup;
     }
 
     std::cout << "[UserStudy] Initializing CSV files..." << std::endl;
@@ -178,21 +194,25 @@ std::vector<TrialConfig> UserStudyManager::generateRandomizedTrials()
 void UserStudyManager::generateExp2Sequence()
 {
     m_exp2Sequence.clear();
-    std::vector<AngleTrialConfig> combos;
-    for (double ax : kExp2Angles) {
-        for (double az : kExp2Angles) {
-            combos.push_back({ ax, az });
-        }
-    }
+    std::vector<std::vector<AngleTrialConfig>> planeBuckets(kExp2Planes.size());
 
     for (int rep = 0; rep < kExp2Repetitions; ++rep) {
-        m_exp2Sequence.insert(m_exp2Sequence.end(), combos.begin(), combos.end());
+        for (double ang : kExp2AnglesDeg) {
+            for (size_t planeIdx = 0; planeIdx < kExp2Planes.size(); ++planeIdx) {
+                planeBuckets[planeIdx].push_back({ kExp2Planes[planeIdx], ang });
+            }
+        }
     }
 
     std::random_device rd;
     std::mt19937 g(rd());
-    std::shuffle(m_exp2Sequence.begin(), m_exp2Sequence.end(), g);
+    for (auto& bucket : planeBuckets) {
+        std::shuffle(bucket.begin(), bucket.end(), g);
+        m_exp2Sequence.insert(m_exp2Sequence.end(), bucket.begin(), bucket.end());
+    }
+
     m_exp2SequenceLoaded = true;
+    ensureExp2GroupProgressSize();
 }
 
 // ???????
@@ -252,9 +272,9 @@ void UserStudyManager::saveExp2Sequence(const std::string& filename)
         std::cerr << "[UserStudy][Exp2] Cannot save sequence: " << filename << std::endl;
         return;
     }
-    file << "# Experiment2 angle sequence (angleX angleZ)\n";
+    file << "# Experiment2 angle sequence (plane angleDeg)\n";
     for (const auto& t : m_exp2Sequence) {
-        file << t.angleX << " " << t.angleZ << "\n";
+        file << static_cast<int>(t.plane) << " " << t.angleDeg << "\n";
     }
     file.close();
 }
@@ -390,12 +410,179 @@ bool UserStudyManager::loadExp2Sequence(const std::string& filename)
         return false;
     }
     m_exp2Sequence.clear();
-    double ax, az;
-    while (file >> ax >> az) {
-        m_exp2Sequence.push_back({ ax, az });
+    int planeInt;
+    double angleDeg;
+    while (file >> planeInt >> angleDeg) {
+        if (planeInt < 0 || planeInt > static_cast<int>(Exp2Plane::PLANE_Z)) {
+            continue;
+        }
+        m_exp2Sequence.push_back({ static_cast<Exp2Plane>(planeInt), angleDeg });
+    }
+    m_exp2SequenceLoaded = !m_exp2Sequence.empty();
+    ensureExp2GroupProgressSize();
+    return m_exp2SequenceLoaded;
+}
+
+bool UserStudyManager::isExp2SequenceGroupedByPlane() const
+{
+    if (!m_exp2SequenceLoaded ||
+        m_exp2Sequence.size() != getExp2ExpectedTrialCountInternal() ||
+        kExp2TrialsPerGroup == 0 ||
+        (m_exp2Sequence.size() % kExp2TrialsPerGroup) != 0) {
+        return false;
+    }
+
+    std::vector<size_t> counts(kExp2Planes.size(), 0);
+    for (const auto& cfg : m_exp2Sequence) {
+        size_t idx = static_cast<size_t>(cfg.plane);
+        if (idx >= counts.size()) {
+            return false;
+        }
+        counts[idx]++;
+    }
+
+    for (size_t c : counts) {
+        if (c != kExp2TrialsPerGroup) return false;
+    }
+
+    for (size_t start = 0; start < m_exp2Sequence.size(); start += kExp2TrialsPerGroup) {
+        Exp2Plane plane = m_exp2Sequence[start].plane;
+        for (size_t i = start; i < start + kExp2TrialsPerGroup; ++i) {
+            if (m_exp2Sequence[i].plane != plane) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+void UserStudyManager::regroupExp2SequenceByPlane(bool shuffleWithinGroups)
+{
+    if (m_exp2Sequence.empty()) return;
+
+    std::vector<std::vector<AngleTrialConfig>> buckets(kExp2Planes.size());
+    for (const auto& cfg : m_exp2Sequence) {
+        size_t idx = static_cast<size_t>(cfg.plane);
+        if (idx >= buckets.size()) {
+            continue;
+        }
+        buckets[idx].push_back(cfg);
+    }
+
+    for (size_t i = 0; i < buckets.size(); ++i) {
+        if (buckets[i].size() != kExp2TrialsPerGroup) {
+            std::cout << "[UserStudy][Exp2] Regroup skipped: unexpected trial count for plane " << i << std::endl;
+            return;
+        }
+    }
+
+    if (shuffleWithinGroups) {
+        std::random_device rd;
+        std::mt19937 g(rd());
+        for (auto& bucket : buckets) {
+            std::shuffle(bucket.begin(), bucket.end(), g);
+        }
+    }
+
+    m_exp2Sequence.clear();
+    for (const auto& bucket : buckets) {
+        m_exp2Sequence.insert(m_exp2Sequence.end(), bucket.begin(), bucket.end());
     }
     m_exp2SequenceLoaded = (m_exp2Sequence.size() == getExp2ExpectedTrialCountInternal());
-    return m_exp2SequenceLoaded;
+}
+
+void UserStudyManager::ensureExp2SequenceGrouped()
+{
+    if (!m_exp2SequenceLoaded) {
+        return;
+    }
+
+    if (isExp2SequenceGroupedByPlane()) {
+        return;
+    }
+
+    std::cout << "[UserStudy][Exp2] Regrouping sequence into plane-specific blocks (X/Y/Z, 60 trials each)." << std::endl;
+    regroupExp2SequenceByPlane(true);
+    if (isExp2SequenceGroupedByPlane()) {
+        saveExp2Sequence(getExp2SequenceFilename());
+    }
+}
+
+int UserStudyManager::findExp2GroupStartIndex(Exp2Plane plane) const
+{
+    if (!m_exp2SequenceLoaded || m_exp2Sequence.empty()) {
+        return -1;
+    }
+
+    if (kExp2TrialsPerGroup > 0) {
+        for (size_t start = 0; start + kExp2TrialsPerGroup <= m_exp2Sequence.size(); start += kExp2TrialsPerGroup) {
+            bool allMatch = true;
+            for (size_t i = start; i < start + kExp2TrialsPerGroup; ++i) {
+                if (m_exp2Sequence[i].plane != plane) {
+                    allMatch = false;
+                    break;
+                }
+            }
+            if (allMatch) {
+                return static_cast<int>(start);
+            }
+        }
+    }
+
+    for (size_t i = 0; i < m_exp2Sequence.size(); ++i) {
+        if (m_exp2Sequence[i].plane == plane) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+void UserStudyManager::setManualExp2Group(Exp2Plane plane)
+{
+    if (!m_exp2SequenceLoaded || m_exp2Sequence.empty()) {
+        std::cout << "[UserStudy][Exp2] No sequence loaded. Unable to change group." << std::endl;
+        return;
+    }
+
+    int startIdx = findExp2GroupStartIndex(plane);
+    if (startIdx < 0) {
+        std::cout << "[UserStudy][Exp2] Plane group not found in current sequence." << std::endl;
+        return;
+    }
+
+    int perGroup = getExp2TrialsPerGroup();
+    int groupIdx = (perGroup > 0) ? (startIdx / perGroup) : 0;
+    ensureExp2GroupProgressSize();
+    int trialOffset = (groupIdx >= 0 && groupIdx < static_cast<int>(m_exp2GroupProgress.size()))
+        ? m_exp2GroupProgress[groupIdx]
+        : 0;
+    int groupSize = getExp2GroupSize(groupIdx);
+    if (trialOffset > groupSize) trialOffset = groupSize;
+    m_exp2CurrentGroup = groupIdx;
+    m_exp2CurrentTrialIndex = startIdx + trialOffset;
+    if (m_exp2CurrentTrialIndex >= static_cast<int>(m_exp2Sequence.size())) {
+        if (groupSize > 0) {
+            m_exp2CurrentTrialIndex = startIdx + groupSize - 1;
+        }
+        else {
+            m_exp2CurrentTrialIndex = static_cast<int>(m_exp2Sequence.size()) - 1;
+        }
+        if (m_exp2CurrentTrialIndex < 0) m_exp2CurrentTrialIndex = 0;
+    }
+    m_exp2TrialActive = false;
+    m_exp2NeedBreak = false;
+    m_exp2CurrentTrial.plane = plane;
+    m_exp2CurrentTrial.targetAngleDeg = 0.0;
+    m_exp2CurrentTrial.userAngleDeg = 0.0;
+    bool remaining = hasNextTrialExp2();
+    m_exp2State = remaining ? ExperimentState::READY : ExperimentState::EXPERIMENT_COMPLETE;
+
+    saveProgress();
+
+    std::cout << "[UserStudy][Exp2] Manual jump to plane "
+        << static_cast<int>(plane)
+        << " starting at trial #" << (m_exp2CurrentTrialIndex + 1)
+        << " of " << m_exp2Sequence.size() << std::endl;
 }
 
 // ????
@@ -405,11 +592,28 @@ void UserStudyManager::saveProgress()
     if (!file) return;
 
     file << "# Progress for User: " << m_userId << "\n";
-    file << "CurrentGroup " << m_currentTrialGroup << "\n";
-    file << "CurrentTrialInGroup " << m_currentTrialInGroup << "\n";
+
+    ensureExp1GroupProgressSize();
+    ensureExp2GroupProgressSize();
+
+    int exp1TotalDone = getExp1CompletedTrials();
+    int exp2TotalDone = getExp2CompletedTrials();
+
+    file << "Exp1CurrentTrial " << (m_currentTrialGroup * 110 + m_currentTrialInGroup) << "\n";
+    file << "Exp1CurrentGroup " << m_currentTrialGroup << "\n";
+    file << "Exp1State " << static_cast<int>(m_experimentState) << "\n";
+    file << "Exp1TotalTrialsCompleted " << exp1TotalDone << "\n";
+    file << "Exp1GroupProgress";
+    for (int v : m_groupProgress) file << " " << v;
+    file << "\n";
+
     file << "Exp2CurrentTrial " << m_exp2CurrentTrialIndex << "\n";
+    file << "Exp2CurrentGroup " << m_exp2CurrentGroup << "\n";
     file << "Exp2State " << static_cast<int>(m_exp2State) << "\n";
-    file << "TotalTrialsCompleted " << m_results.size() << "\n";
+    file << "Exp2TotalTrialsCompleted " << exp2TotalDone << "\n";
+    file << "Exp2GroupProgress";
+    for (int v : m_exp2GroupProgress) file << " " << v;
+    file << "\n";
 
     file.close();
 }
@@ -426,6 +630,13 @@ bool UserStudyManager::loadProgress(const std::string& filename)
     m_exp2State = ExperimentState::READY;
     m_exp2NeedBreak = false;
     m_exp2TrialActive = false;
+    m_groupProgress.clear();
+    m_exp2GroupProgress.clear();
+    m_currentTrialGroup = 0;
+    m_currentTrialInGroup = 0;
+    m_experimentState = ExperimentState::READY;
+    int exp1CurrentTrialFlat = -1;
+    int exp2CurrentTrialFlat = -1;
 
     std::string line;
     while (std::getline(file, line)) {
@@ -434,15 +645,35 @@ bool UserStudyManager::loadProgress(const std::string& filename)
         std::istringstream iss(line);
         std::string key;
         if (iss >> key) {
-            if (key == "CurrentGroup") {
+            // New-format keys
+            if (key == "Exp1CurrentTrial") {
+                iss >> exp1CurrentTrialFlat;
+            }
+            else if (key == "Exp1CurrentGroup") {
                 iss >> m_currentTrialGroup;
             }
-            else if (key == "CurrentTrialInGroup") {
-                iss >> m_currentTrialInGroup;
+            else if (key == "Exp1State") {
+                int stateInt = 0;
+                iss >> stateInt;
+                if (stateInt < 0 || stateInt > static_cast<int>(ExperimentState::EXPERIMENT_COMPLETE)) stateInt = 0;
+                m_experimentState = static_cast<ExperimentState>(stateInt);
+            }
+            else if (key == "Exp1TotalTrialsCompleted") {
+                int tmp; iss >> tmp;
+            }
+            else if (key == "Exp1GroupProgress") {
+                int v;
+                while (iss >> v) {
+                    m_groupProgress.push_back(v);
+                }
             }
             else if (key == "Exp2CurrentTrial") {
-                iss >> m_exp2CurrentTrialIndex;
-                if (m_exp2CurrentTrialIndex < 0) m_exp2CurrentTrialIndex = 0;
+                iss >> exp2CurrentTrialFlat;
+                if (exp2CurrentTrialFlat < 0) exp2CurrentTrialFlat = 0;
+            }
+            else if (key == "Exp2CurrentGroup") {
+                iss >> m_exp2CurrentGroup;
+                if (m_exp2CurrentGroup < 0) m_exp2CurrentGroup = 0;
             }
             else if (key == "Exp2State") {
                 int stateInt = 0;
@@ -450,15 +681,90 @@ bool UserStudyManager::loadProgress(const std::string& filename)
                 if (stateInt < 0 || stateInt > static_cast<int>(ExperimentState::EXPERIMENT_COMPLETE)) stateInt = 0;
                 m_exp2State = static_cast<ExperimentState>(stateInt);
             }
+            else if (key == "Exp2GroupProgress") {
+                int v;
+                while (iss >> v) {
+                    m_exp2GroupProgress.push_back(v);
+                }
+            }
+            else if (key == "Exp2TotalTrialsCompleted") {
+                int tmp; iss >> tmp;
+            }
+            // Legacy keys (backward compatibility)
+            else if (key == "CurrentGroup") {
+                iss >> m_currentTrialGroup;
+            }
+            else if (key == "CurrentTrialInGroup") {
+                iss >> m_currentTrialInGroup;
+            }
             else if (key == "TotalTrialsCompleted") {
-                int totalCompleted;
-                iss >> totalCompleted;
-                // ???????????
+                int tmp; iss >> tmp;
+            }
+            else if (key == "Exp2CurrentTrialLegacy") {
+                // no-op placeholder
             }
         }
     }
 
     file.close();
+    ensureExp1GroupProgressSize();
+    ensureExp2GroupProgressSize();
+
+    // Derive Exp1 indices
+    if (exp1CurrentTrialFlat >= 0) {
+        m_currentTrialGroup = exp1CurrentTrialFlat / 110;
+        m_currentTrialInGroup = exp1CurrentTrialFlat % 110;
+    }
+    // Backward compatibility: if group progress missing, seed from current indices
+    if (m_groupProgress.empty() && !m_experimentSequence.empty()) {
+        m_groupProgress.resize(m_experimentSequence.size(), 0);
+    }
+    if (m_currentTrialGroup >= 0 && m_currentTrialGroup < static_cast<int>(m_groupProgress.size())) {
+        if (m_groupProgress[m_currentTrialGroup] < m_currentTrialInGroup) {
+            m_groupProgress[m_currentTrialGroup] = m_currentTrialInGroup;
+        }
+        else {
+            m_currentTrialInGroup = m_groupProgress[m_currentTrialGroup];
+        }
+    }
+
+    int perGroup = getExp2TrialsPerGroup();
+    int exp2GroupCount = getExp2GroupCount();
+    if (exp2CurrentTrialFlat >= 0) {
+        m_exp2CurrentTrialIndex = exp2CurrentTrialFlat;
+    }
+    if (m_exp2GroupProgress.empty() && exp2GroupCount > 0) {
+        m_exp2GroupProgress.resize(exp2GroupCount, 0);
+        if (perGroup > 0) {
+            int completedGroups = m_exp2CurrentTrialIndex / perGroup;
+            int idxInGroup = m_exp2CurrentTrialIndex % perGroup;
+            for (int g = 0; g < exp2GroupCount; ++g) {
+                if (g < completedGroups) {
+                    m_exp2GroupProgress[g] = getExp2GroupSize(g);
+                }
+                else if (g == completedGroups) {
+                    m_exp2GroupProgress[g] = idxInGroup;
+                }
+            }
+        }
+    }
+    if (m_exp2CurrentGroup < 0 || m_exp2CurrentGroup >= exp2GroupCount) {
+        if (perGroup > 0) {
+            m_exp2CurrentGroup = m_exp2CurrentTrialIndex / perGroup;
+        }
+        if (m_exp2CurrentGroup < 0 || m_exp2CurrentGroup >= exp2GroupCount) {
+            m_exp2CurrentGroup = 0;
+        }
+    }
+    if (m_exp2CurrentGroup < static_cast<int>(m_exp2GroupProgress.size())) {
+        int grpProg = m_exp2GroupProgress[m_exp2CurrentGroup];
+        int grpSize = getExp2GroupSize(m_exp2CurrentGroup);
+        if (grpProg > grpSize) grpProg = grpSize;
+        int computedIndex = m_exp2CurrentGroup * getExp2TrialsPerGroup() + grpProg;
+        if (computedIndex < static_cast<int>(m_exp2Sequence.size())) {
+            m_exp2CurrentTrialIndex = computedIndex;
+        }
+    }
     sanitizeProgressIndices();
     return true;
 }
@@ -488,6 +794,10 @@ void UserStudyManager::startNextTrial()
     }
 
     sanitizeProgressIndices();
+    ensureExp1GroupProgressSize();
+    if (m_currentTrialGroup >= 0 && m_currentTrialGroup < static_cast<int>(m_groupProgress.size())) {
+        m_currentTrialInGroup = m_groupProgress[m_currentTrialGroup];
+    }
 
     // ????
     if (m_currentTrialGroup >= m_experimentSequence.size()) {
@@ -499,13 +809,22 @@ void UserStudyManager::startNextTrial()
 
     // ???????????
     if (m_currentTrialInGroup >= 110) {
-        m_currentTrialInGroup = 0;
+        if (m_currentTrialGroup >= 0 && m_currentTrialGroup < static_cast<int>(m_groupProgress.size())) {
+            m_groupProgress[m_currentTrialGroup] = 110;
+        }
         m_currentTrialGroup++;
         if (m_currentTrialGroup >= 6) {
             m_experimentState = ExperimentState::EXPERIMENT_COMPLETE;
             std::cout << "[UserStudy] Experiment Complete! Thank you for your participation." << std::endl;
             saveResults("user_" + m_userId + "_final_results.csv");
             return;
+        }
+        ensureExp1GroupProgressSize();
+        if (m_currentTrialGroup < static_cast<int>(m_groupProgress.size())) {
+            m_currentTrialInGroup = m_groupProgress[m_currentTrialGroup];
+        }
+        else {
+            m_currentTrialInGroup = 0;
         }
     }
 
@@ -632,9 +951,18 @@ void UserStudyManager::recordUserChoice(int choice)
 
     // ????
     m_currentTrialInGroup++;
+    ensureExp1GroupProgressSize();
+    if (m_currentTrialGroup >= 0 && m_currentTrialGroup < static_cast<int>(m_groupProgress.size())) {
+        if (m_currentTrialInGroup > m_groupProgress[m_currentTrialGroup]) {
+            m_groupProgress[m_currentTrialGroup] = m_currentTrialInGroup;
+        }
+    }
 
     // ????
     if (m_currentTrialInGroup >= 110) {
+        if (m_currentTrialGroup >= 0 && m_currentTrialGroup < static_cast<int>(m_groupProgress.size())) {
+            m_groupProgress[m_currentTrialGroup] = 110;
+        }
         m_experimentState = ExperimentState::GROUP_COMPLETE;
         std::cout << "\n[UserStudy] >>> GROUP " << (m_currentTrialGroup + 1)
             << " COMPLETE! <<<" << std::endl;
@@ -714,7 +1042,8 @@ void UserStudyManager::setManualTrialGroup(InteractionMode m, FeedbackDirection 
         if (m_experimentSequence[i].mode == m &&
             m_experimentSequence[i].direction == d) {
             m_currentTrialGroup = i;
-            m_currentTrialInGroup = 0;
+            ensureExp1GroupProgressSize();
+            m_currentTrialInGroup = (i < m_groupProgress.size()) ? m_groupProgress[i] : 0;
             m_currentMode = m;
             m_currentDirection = d;
             std::cout << "[UserStudy] Manual jump to Group " << i
@@ -729,12 +1058,17 @@ void UserStudyManager::setManualTrialGroup(InteractionMode m, FeedbackDirection 
 void UserStudyManager::resetCurrentGroup()
 {
     m_currentTrialInGroup = 0;
+    ensureExp1GroupProgressSize();
+    if (m_currentTrialGroup >= 0 && m_currentTrialGroup < static_cast<int>(m_groupProgress.size())) {
+        m_groupProgress[m_currentTrialGroup] = 0;
+    }
     saveProgress();
     std::cout << "[UserStudy] Group reset.\n";
 }
 
 void UserStudyManager::sanitizeProgressIndices()
 {
+    ensureExp1GroupProgressSize();
     if (!m_sequenceLoaded || m_experimentSequence.empty()) {
         m_currentTrialGroup = 0;
         m_currentTrialInGroup = 0;
@@ -763,6 +1097,50 @@ void UserStudyManager::sanitizeProgressIndices()
             << " for group " << m_currentTrialGroup << ". Resetting to 0." << std::endl;
         m_currentTrialInGroup = 0;
     }
+}
+
+void UserStudyManager::ensureExp1GroupProgressSize()
+{
+    size_t groupCount = m_experimentSequence.size();
+    if (groupCount == 0) return;
+    if (m_groupProgress.size() < groupCount) {
+        m_groupProgress.resize(groupCount, 0);
+    }
+    // clamp oversized entries
+    for (size_t i = 0; i < groupCount; ++i) {
+        int maxTrials = (i < m_experimentSequence.size()) ? static_cast<int>(m_experimentSequence[i].trials.size()) : 110;
+        if (maxTrials < 0) maxTrials = 0;
+        if (m_groupProgress[i] < 0) m_groupProgress[i] = 0;
+        if (m_groupProgress[i] > maxTrials) m_groupProgress[i] = maxTrials;
+    }
+}
+
+void UserStudyManager::ensureExp2GroupProgressSize()
+{
+    int groupCount = getExp2GroupCount();
+    if (groupCount < 0) groupCount = 0;
+    if (m_exp2GroupProgress.size() < static_cast<size_t>(groupCount)) {
+        m_exp2GroupProgress.resize(groupCount, 0);
+    }
+    for (int i = 0; i < groupCount; ++i) {
+        int maxTrials = getExp2GroupSize(i);
+        if (maxTrials < 0) maxTrials = 0;
+        if (m_exp2GroupProgress[i] < 0) m_exp2GroupProgress[i] = 0;
+        if (m_exp2GroupProgress[i] > maxTrials) m_exp2GroupProgress[i] = maxTrials;
+    }
+}
+
+int UserStudyManager::findNextExp2GroupWithRemaining(int startGroup) const
+{
+    int groupCount = getExp2GroupCount();
+    if (groupCount <= 0) return -1;
+    for (int offset = 0; offset < groupCount; ++offset) {
+        int idx = (startGroup + offset) % groupCount;
+        int size = getExp2GroupSize(idx);
+        int prog = (idx < static_cast<int>(m_exp2GroupProgress.size())) ? m_exp2GroupProgress[idx] : 0;
+        if (prog < size) return idx;
+    }
+    return -1;
 }
 
 
@@ -800,22 +1178,64 @@ bool UserStudyManager::hasNextTrialExp2() const
         m_exp2State == ExperimentState::EXPERIMENT_COMPLETE) {
         return false;
     }
-    return m_exp2CurrentTrialIndex < static_cast<int>(m_exp2Sequence.size());
+    int groupCount = getExp2GroupCount();
+    for (int i = 0; i < groupCount; ++i) {
+        int size = getExp2GroupSize(i);
+        int prog = (i < static_cast<int>(m_exp2GroupProgress.size())) ? m_exp2GroupProgress[i] : 0;
+        if (prog < size) return true;
+    }
+    return false;
 }
 
 void UserStudyManager::startNextTrialExp2()
 {
     if (!hasNextTrialExp2()) {
-        if (m_exp2CurrentTrialIndex >= static_cast<int>(m_exp2Sequence.size())) {
-            m_exp2State = ExperimentState::EXPERIMENT_COMPLETE;
-        }
+        m_exp2CurrentTrialIndex = static_cast<int>(m_exp2Sequence.size());
+        m_exp2State = ExperimentState::EXPERIMENT_COMPLETE;
         return;
     }
 
+    m_exp2NeedBreak = false;
+    ensureExp2GroupProgressSize();
+    int groupCount = getExp2GroupCount();
+    if (groupCount <= 0) {
+        m_exp2State = ExperimentState::EXPERIMENT_COMPLETE;
+        return;
+    }
+
+    if (m_exp2CurrentGroup < 0 || m_exp2CurrentGroup >= groupCount) {
+        m_exp2CurrentGroup = 0;
+    }
+
+    int targetGroup = m_exp2CurrentGroup;
+    int grpSize = getExp2GroupSize(targetGroup);
+    int grpProg = (targetGroup < static_cast<int>(m_exp2GroupProgress.size())) ? m_exp2GroupProgress[targetGroup] : 0;
+    if (grpProg >= grpSize) {
+        int nextGroup = findNextExp2GroupWithRemaining(targetGroup + 1);
+        if (nextGroup < 0) {
+            m_exp2State = ExperimentState::EXPERIMENT_COMPLETE;
+            m_exp2CurrentTrialIndex = static_cast<int>(m_exp2Sequence.size());
+            return;
+        }
+        targetGroup = nextGroup;
+        grpSize = getExp2GroupSize(targetGroup);
+        grpProg = (targetGroup < static_cast<int>(m_exp2GroupProgress.size())) ? m_exp2GroupProgress[targetGroup] : 0;
+    }
+
+    m_exp2CurrentGroup = targetGroup;
+    int groupStart = targetGroup * getExp2TrialsPerGroup();
+    int trialIdx = groupStart + grpProg;
+    if (trialIdx < 0 || trialIdx >= static_cast<int>(m_exp2Sequence.size())) {
+        m_exp2State = ExperimentState::EXPERIMENT_COMPLETE;
+        m_exp2CurrentTrialIndex = static_cast<int>(m_exp2Sequence.size());
+        return;
+    }
+
+    m_exp2CurrentTrialIndex = trialIdx;
     const auto& cfg = m_exp2Sequence[m_exp2CurrentTrialIndex];
     m_exp2CurrentTrial.trialNumber = m_exp2CurrentTrialIndex;
-    m_exp2CurrentTrial.targetAngleX = cfg.angleX;
-    m_exp2CurrentTrial.targetAngleZ = cfg.angleZ;
+    m_exp2CurrentTrial.plane = cfg.plane;
+    m_exp2CurrentTrial.targetAngleDeg = cfg.angleDeg;
     m_exp2CurrentTrial.trialStartTime = std::chrono::steady_clock::now();
     m_exp2TrialStart = m_exp2CurrentTrial.trialStartTime;
     m_exp2TrialActive = true;
@@ -823,7 +1243,7 @@ void UserStudyManager::startNextTrialExp2()
     m_exp2NeedBreak = false;
 }
 
-void UserStudyManager::recordExp2UserAngles(double userAngleX, double userAngleZ, double durationSeconds)
+void UserStudyManager::recordExp2UserAngle(double userAngleDeg, double durationSeconds)
 {
     if (!m_exp2TrialActive) {
         std::cout << "[UserStudy][Exp2] No active trial to record.\n";
@@ -834,8 +1254,7 @@ void UserStudyManager::recordExp2UserAngles(double userAngleX, double userAngleZ
     if (durationSeconds <= 0.0) {
         durationSeconds = std::chrono::duration<double>(m_exp2CurrentTrial.confirmTime - m_exp2TrialStart).count();
     }
-    m_exp2CurrentTrial.userAngleX = userAngleX;
-    m_exp2CurrentTrial.userAngleZ = userAngleZ;
+    m_exp2CurrentTrial.userAngleDeg = userAngleDeg;
     m_exp2CurrentTrial.durationSeconds = durationSeconds;
     m_exp2Results.push_back(m_exp2CurrentTrial);
     if (m_exp2CsvFileReady) {
@@ -843,27 +1262,72 @@ void UserStudyManager::recordExp2UserAngles(double userAngleX, double userAngleZ
     }
 
     m_exp2TrialActive = false;
-    m_exp2CurrentTrialIndex++;
-    if (m_exp2CurrentTrialIndex >= static_cast<int>(m_exp2Sequence.size())) {
+
+    int perGroup = getExp2TrialsPerGroup();
+    int groupIdx = (perGroup > 0) ? (m_exp2CurrentTrial.trialNumber / perGroup) : 0;
+    int trialInGroup = (perGroup > 0) ? (m_exp2CurrentTrial.trialNumber % perGroup) : m_exp2CurrentTrial.trialNumber;
+    int groupSize = getExp2GroupSize(groupIdx);
+    int nextInGroup = trialInGroup + 1;
+
+    ensureExp2GroupProgressSize();
+    if (groupIdx >= 0 && groupIdx < static_cast<int>(m_exp2GroupProgress.size())) {
+        if (nextInGroup > m_exp2GroupProgress[groupIdx]) {
+            m_exp2GroupProgress[groupIdx] = nextInGroup;
+        }
+    }
+
+    // Update current group pointer
+    m_exp2CurrentGroup = groupIdx;
+
+    if (!hasNextTrialExp2()) {
         m_exp2State = ExperimentState::EXPERIMENT_COMPLETE;
+        m_exp2CurrentTrialIndex = static_cast<int>(m_exp2Sequence.size());
     }
     else {
         m_exp2State = ExperimentState::TRIAL_COMPLETE;
-        if (m_exp2CurrentTrialIndex % 60 == 0) {
-            m_exp2NeedBreak = true;
+        m_exp2NeedBreak = (nextInGroup >= groupSize && groupSize > 0);
+
+        int nextGroup = m_exp2CurrentGroup;
+        if (nextInGroup >= groupSize) {
+            nextGroup = findNextExp2GroupWithRemaining(m_exp2CurrentGroup + 1);
+        }
+        if (nextGroup < 0) {
+            m_exp2State = ExperimentState::EXPERIMENT_COMPLETE;
+            m_exp2CurrentTrialIndex = static_cast<int>(m_exp2Sequence.size());
+        }
+        else {
+            m_exp2CurrentGroup = nextGroup;
+            int nextStart = m_exp2CurrentGroup * getExp2TrialsPerGroup();
+            int nextOffset = (m_exp2CurrentGroup < static_cast<int>(m_exp2GroupProgress.size()))
+                ? m_exp2GroupProgress[m_exp2CurrentGroup]
+                : 0;
+            m_exp2CurrentTrialIndex = nextStart + nextOffset;
         }
     }
     saveProgress();
 }
 
+// Legacy shim to keep existing Soft_gripper.cpp building while Exp2 UI is refactored.
+void UserStudyManager::recordExp2UserAngles(double userAngleX, double userAngleZ, double durationSeconds)
+{
+    // For the new single-angle design we only use one value; fall back to X as input.
+    recordExp2UserAngle(userAngleX, durationSeconds);
+}
+
+double UserStudyManager::getExp2TargetAngleDeg() const
+{
+    return m_exp2CurrentTrial.targetAngleDeg;
+}
+
+// Legacy shims
 double UserStudyManager::getExp2TargetAngleX() const
 {
-    return m_exp2CurrentTrial.targetAngleX;
+    return m_exp2CurrentTrial.targetAngleDeg;
 }
 
 double UserStudyManager::getExp2TargetAngleZ() const
 {
-    return m_exp2CurrentTrial.targetAngleZ;
+    return 0.0;
 }
 
 int UserStudyManager::getExp2ExpectedTrialCount() const
@@ -871,6 +1335,46 @@ int UserStudyManager::getExp2ExpectedTrialCount() const
     return static_cast<int>(getExp2ExpectedTrialCountInternal());
 }
 
+int UserStudyManager::getExp2TrialsPerGroup() const
+{
+    return static_cast<int>(kExp2TrialsPerGroup);
+}
+
+int UserStudyManager::getExp2GroupCount() const
+{
+    if (kExp2TrialsPerGroup == 0) return 0;
+    return static_cast<int>((m_exp2Sequence.size() + kExp2TrialsPerGroup - 1) / kExp2TrialsPerGroup);
+}
+
+int UserStudyManager::getExp2GroupSize(int groupIdx) const
+{
+    if (groupIdx < 0) return 0;
+    size_t start = static_cast<size_t>(groupIdx) * kExp2TrialsPerGroup;
+    if (start >= m_exp2Sequence.size()) return 0;
+    size_t remaining = m_exp2Sequence.size() - start;
+    return static_cast<int>(std::min<size_t>(kExp2TrialsPerGroup, remaining));
+}
+
+int UserStudyManager::getExp2CompletedTrials() const
+{
+    int total = 0;
+    int groupCount = getExp2GroupCount();
+    for (int i = 0; i < groupCount; ++i) {
+        total += std::min(getExp2GroupSize(i), (i < static_cast<int>(m_exp2GroupProgress.size())) ? m_exp2GroupProgress[i] : 0);
+    }
+    return total;
+}
+
+int UserStudyManager::getExp1CompletedTrials() const
+{
+    int total = 0;
+    size_t groupCount = m_groupProgress.size();
+    for (size_t i = 0; i < groupCount; ++i) {
+        int maxTrials = (i < m_experimentSequence.size()) ? static_cast<int>(m_experimentSequence[i].trials.size()) : 110;
+        total += std::min(maxTrials, m_groupProgress[i]);
+    }
+    return total;
+}
 void UserStudyManager::createOrLoadUserCSV()
 {
     std::string csvFilename = getUserCSVFilename();
@@ -988,7 +1492,7 @@ void UserStudyManager::createOrLoadUserCSVExp2()
             m_exp2CsvFileReady = false;
             return;
         }
-        file << "TrialNumber,TargetAngleX,TargetAngleZ,UserAngleX,UserAngleZ,DurationSeconds\n";
+        file << "TrialNumber,GroupIndex,TrialInGroup,Plane,TargetAngleDeg,UserAngleDeg,DurationSeconds\n";
         file.close();
     }
 
@@ -1003,13 +1507,18 @@ void UserStudyManager::writeExp2TrialToCSV(const AngleTrialResult& trial)
         std::cerr << "[UserStudy][Exp2] ERROR: Cannot open CSV for writing\n";
         return;
     }
-    file << trial.trialNumber << ","
-        << std::fixed << std::setprecision(2) << trial.targetAngleX << ","
-        << trial.targetAngleZ << ","
-        << trial.userAngleX << ","
-        << trial.userAngleZ << ","
+    int groupIdx = (getExp2TrialsPerGroup() > 0)
+        ? (trial.trialNumber / getExp2TrialsPerGroup())
+        : 0;
+    int trialInGroup = (getExp2TrialsPerGroup() > 0)
+        ? (trial.trialNumber % getExp2TrialsPerGroup())
+        : trial.trialNumber;
+    file << (trial.trialNumber + 1) << ","
+        << (groupIdx + 1) << ","
+        << (trialInGroup + 1) << ","
+        << static_cast<int>(trial.plane) << ","
+        << std::fixed << std::setprecision(2) << trial.targetAngleDeg << ","
+        << trial.userAngleDeg << ","
         << std::fixed << std::setprecision(3) << trial.durationSeconds << "\n";
     file.close();
 }
-
-
