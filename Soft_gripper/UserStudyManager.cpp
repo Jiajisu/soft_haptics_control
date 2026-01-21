@@ -4,6 +4,7 @@
 #include <iostream>
 #include <sstream>
 #include <iomanip>
+#include <map>
 
 namespace {
 int polarityToInt(SurfacePolarity p) {
@@ -18,16 +19,47 @@ std::string polarityToString(SurfacePolarity p) {
     return (p == SurfacePolarity::POSITIVE) ? "positive" : "negative";
 }
 
-const std::array<Exp2Plane, 3> kExp2Planes = {
+const std::array<Exp2Plane, 3> kExp2AxisPlanes = {
     Exp2Plane::PLANE_X,
     Exp2Plane::PLANE_Y,
     Exp2Plane::PLANE_Z
 };
+// Axis-plane angles (B)
 const std::vector<double> kExp2AnglesDeg = { 0.0, 30.0, 60.0, 90.0, 120.0, 150.0, 180.0, 210.0, 240.0, 270.0, 300.0, 330.0 };
 constexpr int kExp2Repetitions = 5;
-const size_t kExp2TrialsPerGroup = kExp2AnglesDeg.size() * kExp2Repetitions;
+
+// Combined-angle pairs [A,B] where A = plane rotation about Z, B = in-plane angle
+using Exp2AnglePair = std::array<double, 2>;
+const std::vector<Exp2AnglePair> kExp2CombinedAnglesDeg = {
+    {30.0, 30.0},
+    {60.0, 60.0},
+    {60.0, 30.0},
+};
+constexpr int kExp2CombinedRepetitions = 5;
+
+inline size_t getExp2TrialsPerAxisGroup() {
+    return kExp2AnglesDeg.size() * kExp2Repetitions;
+}
+
+inline size_t getExp2CombinedGroupSize() {
+    return kExp2CombinedAnglesDeg.size() * kExp2CombinedRepetitions;
+}
+
 inline size_t getExp2ExpectedTrialCountInternal() {
-    return kExp2TrialsPerGroup * kExp2Planes.size();
+    return getExp2TrialsPerAxisGroup() * kExp2AxisPlanes.size() + getExp2CombinedGroupSize();
+}
+
+std::vector<int> getDefaultExp2GroupSizes() {
+    std::vector<int> sizes;
+    const int perAxisGroup = static_cast<int>(getExp2TrialsPerAxisGroup());
+    for (size_t i = 0; i < kExp2AxisPlanes.size(); ++i) {
+        sizes.push_back(perAxisGroup);
+    }
+    const int combinedSize = static_cast<int>(getExp2CombinedGroupSize());
+    if (combinedSize > 0) {
+        sizes.push_back(combinedSize);
+    }
+    return sizes;
 }
 }
 
@@ -50,6 +82,7 @@ UserStudyManager::UserStudyManager()
     , m_exp2NeedBreak(false)
 {
     generateComparisonStiffnesses();
+    m_exp2GroupSizes = getDefaultExp2GroupSizes();
 }
 
 UserStudyManager::~UserStudyManager()
@@ -91,6 +124,15 @@ bool UserStudyManager::loadOrCreateUserSession(const std::string& userId)
         saveExp2Sequence(getExp2SequenceFilename());
     }
     ensureExp2SequenceGrouped();
+    if (m_exp2Sequence.size() != getExp2ExpectedTrialCountInternal()) {
+        std::cout << "[UserStudy][Exp2] Sequence size mismatch detected. Regenerating for 4 groups." << std::endl;
+        generateExp2Sequence();
+        saveExp2Sequence(getExp2SequenceFilename());
+        m_exp2CurrentTrialIndex = 0;
+        m_exp2CurrentGroup = 0;
+        m_exp2State = ExperimentState::READY;
+        m_exp2GroupProgress.clear();
+    }
     ensureExp1GroupProgressSize();
     ensureExp2GroupProgressSize();
 
@@ -194,24 +236,41 @@ std::vector<TrialConfig> UserStudyManager::generateRandomizedTrials()
 void UserStudyManager::generateExp2Sequence()
 {
     m_exp2Sequence.clear();
-    std::vector<std::vector<AngleTrialConfig>> planeBuckets(kExp2Planes.size());
+    m_exp2GroupSizes.clear();
 
-    for (int rep = 0; rep < kExp2Repetitions; ++rep) {
-        for (double ang : kExp2AnglesDeg) {
-            for (size_t planeIdx = 0; planeIdx < kExp2Planes.size(); ++planeIdx) {
-                planeBuckets[planeIdx].push_back({ kExp2Planes[planeIdx], ang });
+    std::vector<std::vector<AngleTrialConfig>> buckets;
+    // Axis-aligned planes
+    for (size_t planeIdx = 0; planeIdx < kExp2AxisPlanes.size(); ++planeIdx) {
+        buckets.emplace_back();
+        auto& bucket = buckets.back();
+        for (int rep = 0; rep < kExp2Repetitions; ++rep) {
+            for (double ang : kExp2AnglesDeg) {
+                bucket.push_back({ kExp2AxisPlanes[planeIdx], 0.0, ang });
+            }
+        }
+    }
+
+    // Combined 3D angles (fourth group)
+    if (!kExp2CombinedAnglesDeg.empty()) {
+        buckets.emplace_back();
+        auto& comboBucket = buckets.back();
+        for (int rep = 0; rep < kExp2CombinedRepetitions; ++rep) {
+            for (const auto& pair : kExp2CombinedAnglesDeg) {
+                comboBucket.push_back({ Exp2Plane::PLANE_COMBINED, pair[0], pair[1] });
             }
         }
     }
 
     std::random_device rd;
     std::mt19937 g(rd());
-    for (auto& bucket : planeBuckets) {
+    for (auto& bucket : buckets) {
         std::shuffle(bucket.begin(), bucket.end(), g);
+        m_exp2GroupSizes.push_back(static_cast<int>(bucket.size()));
         m_exp2Sequence.insert(m_exp2Sequence.end(), bucket.begin(), bucket.end());
     }
 
     m_exp2SequenceLoaded = true;
+    rebuildExp2GroupSizesFromSequence();
     ensureExp2GroupProgressSize();
 }
 
@@ -272,9 +331,11 @@ void UserStudyManager::saveExp2Sequence(const std::string& filename)
         std::cerr << "[UserStudy][Exp2] Cannot save sequence: " << filename << std::endl;
         return;
     }
-    file << "# Experiment2 angle sequence (plane angleDeg)\n";
+    file << "# Experiment2 angle sequence (plane planeSpinDeg inPlaneDeg)\n";
     for (const auto& t : m_exp2Sequence) {
-        file << static_cast<int>(t.plane) << " " << t.angleDeg << "\n";
+        file << static_cast<int>(t.plane) << " "
+            << t.planeRotationDeg << " "
+            << t.inPlaneAngleDeg << "\n";
     }
     file.close();
 }
@@ -410,49 +471,116 @@ bool UserStudyManager::loadExp2Sequence(const std::string& filename)
         return false;
     }
     m_exp2Sequence.clear();
-    int planeInt;
-    double angleDeg;
-    while (file >> planeInt >> angleDeg) {
-        if (planeInt < 0 || planeInt > static_cast<int>(Exp2Plane::PLANE_Z)) {
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        std::istringstream iss(line);
+        int planeInt = 0;
+        double planeSpin = 0.0;
+        double inPlane = 0.0;
+        if (!(iss >> planeInt)) continue;
+        // Old format: only one angle value
+        if (!(iss >> planeSpin)) continue;
+        if (!(iss >> inPlane)) {
+            // two-column legacy format: plane angle
+            inPlane = planeSpin;
+            planeSpin = 0.0;
+        }
+
+        if (planeInt < 0 || planeInt > static_cast<int>(Exp2Plane::PLANE_COMBINED)) {
             continue;
         }
-        m_exp2Sequence.push_back({ static_cast<Exp2Plane>(planeInt), angleDeg });
+        m_exp2Sequence.push_back({ static_cast<Exp2Plane>(planeInt), planeSpin, inPlane });
     }
     m_exp2SequenceLoaded = !m_exp2Sequence.empty();
+    rebuildExp2GroupSizesFromSequence();
     ensureExp2GroupProgressSize();
     return m_exp2SequenceLoaded;
+}
+
+int UserStudyManager::expectedExp2GroupSizeForPlane(Exp2Plane plane) const
+{
+    switch (plane) {
+    case Exp2Plane::PLANE_X:
+    case Exp2Plane::PLANE_Y:
+    case Exp2Plane::PLANE_Z:
+        return static_cast<int>(getExp2TrialsPerAxisGroup());
+    case Exp2Plane::PLANE_COMBINED:
+        return static_cast<int>(getExp2CombinedGroupSize());
+    default:
+        return 0;
+    }
+}
+
+void UserStudyManager::rebuildExp2GroupSizesFromSequence()
+{
+    m_exp2GroupSizes.clear();
+    if (m_exp2Sequence.empty()) {
+        m_exp2GroupSizes = getDefaultExp2GroupSizes();
+        return;
+    }
+
+    Exp2Plane currentPlane = m_exp2Sequence.front().plane;
+    int count = 0;
+    for (const auto& cfg : m_exp2Sequence) {
+        if (cfg.plane != currentPlane) {
+            m_exp2GroupSizes.push_back(count);
+            currentPlane = cfg.plane;
+            count = 0;
+        }
+        ++count;
+    }
+    if (count > 0) {
+        m_exp2GroupSizes.push_back(count);
+    }
+    if (m_exp2GroupSizes.empty()) {
+        m_exp2GroupSizes = getDefaultExp2GroupSizes();
+    }
 }
 
 bool UserStudyManager::isExp2SequenceGroupedByPlane() const
 {
     if (!m_exp2SequenceLoaded ||
-        m_exp2Sequence.size() != getExp2ExpectedTrialCountInternal() ||
-        kExp2TrialsPerGroup == 0 ||
-        (m_exp2Sequence.size() % kExp2TrialsPerGroup) != 0) {
+        m_exp2Sequence.size() != getExp2ExpectedTrialCountInternal()) {
         return false;
     }
 
-    std::vector<size_t> counts(kExp2Planes.size(), 0);
+    if (m_exp2Sequence.empty()) return false;
+
+    std::vector<Exp2Plane> expectedOrder;
+    for (auto p : kExp2AxisPlanes) expectedOrder.push_back(p);
+    if (getExp2CombinedGroupSize() > 0) expectedOrder.push_back(Exp2Plane::PLANE_COMBINED);
+
+    std::vector<int> expectedSizes = getDefaultExp2GroupSizes();
+
+    std::vector<int> actualSizes;
+    std::vector<Exp2Plane> actualOrder;
+    Exp2Plane currentPlane = m_exp2Sequence.front().plane;
+    int count = 0;
     for (const auto& cfg : m_exp2Sequence) {
-        size_t idx = static_cast<size_t>(cfg.plane);
-        if (idx >= counts.size()) {
-            return false;
+        if (cfg.plane != currentPlane) {
+            actualOrder.push_back(currentPlane);
+            actualSizes.push_back(count);
+            currentPlane = cfg.plane;
+            count = 0;
         }
-        counts[idx]++;
+        ++count;
+    }
+    if (count > 0) {
+        actualOrder.push_back(currentPlane);
+        actualSizes.push_back(count);
     }
 
-    for (size_t c : counts) {
-        if (c != kExp2TrialsPerGroup) return false;
+    if (actualOrder.size() != expectedOrder.size() ||
+        actualSizes.size() != expectedSizes.size()) {
+        return false;
     }
 
-    for (size_t start = 0; start < m_exp2Sequence.size(); start += kExp2TrialsPerGroup) {
-        Exp2Plane plane = m_exp2Sequence[start].plane;
-        for (size_t i = start; i < start + kExp2TrialsPerGroup; ++i) {
-            if (m_exp2Sequence[i].plane != plane) {
-                return false;
-            }
-        }
+    for (size_t i = 0; i < expectedOrder.size(); ++i) {
+        if (actualOrder[i] != expectedOrder[i]) return false;
+        if (actualSizes[i] != expectedSizes[i]) return false;
     }
+
     return true;
 }
 
@@ -460,18 +588,28 @@ void UserStudyManager::regroupExp2SequenceByPlane(bool shuffleWithinGroups)
 {
     if (m_exp2Sequence.empty()) return;
 
-    std::vector<std::vector<AngleTrialConfig>> buckets(kExp2Planes.size());
+    std::vector<Exp2Plane> order;
+    for (auto p : kExp2AxisPlanes) order.push_back(p);
+    if (getExp2CombinedGroupSize() > 0) order.push_back(Exp2Plane::PLANE_COMBINED);
+
+    std::vector<std::vector<AngleTrialConfig>> buckets(order.size());
+    std::map<Exp2Plane, size_t> idxMap;
+    for (size_t i = 0; i < order.size(); ++i) {
+        idxMap[order[i]] = i;
+    }
+
     for (const auto& cfg : m_exp2Sequence) {
-        size_t idx = static_cast<size_t>(cfg.plane);
-        if (idx >= buckets.size()) {
-            continue;
-        }
-        buckets[idx].push_back(cfg);
+        auto it = idxMap.find(cfg.plane);
+        if (it == idxMap.end()) continue;
+        buckets[it->second].push_back(cfg);
     }
 
     for (size_t i = 0; i < buckets.size(); ++i) {
-        if (buckets[i].size() != kExp2TrialsPerGroup) {
-            std::cout << "[UserStudy][Exp2] Regroup skipped: unexpected trial count for plane " << i << std::endl;
+        int expectedSize = expectedExp2GroupSizeForPlane(order[i]);
+        if (expectedSize > 0 && buckets[i].size() != static_cast<size_t>(expectedSize)) {
+            std::cout << "[UserStudy][Exp2] Regroup skipped: unexpected trial count for plane "
+                << static_cast<int>(order[i]) << " (" << buckets[i].size()
+                << " vs expected " << expectedSize << ")" << std::endl;
             return;
         }
     }
@@ -484,8 +622,10 @@ void UserStudyManager::regroupExp2SequenceByPlane(bool shuffleWithinGroups)
         }
     }
 
+    m_exp2GroupSizes.clear();
     m_exp2Sequence.clear();
     for (const auto& bucket : buckets) {
+        m_exp2GroupSizes.push_back(static_cast<int>(bucket.size()));
         m_exp2Sequence.insert(m_exp2Sequence.end(), bucket.begin(), bucket.end());
     }
     m_exp2SequenceLoaded = (m_exp2Sequence.size() == getExp2ExpectedTrialCountInternal());
@@ -497,11 +637,12 @@ void UserStudyManager::ensureExp2SequenceGrouped()
         return;
     }
 
+    rebuildExp2GroupSizesFromSequence();
     if (isExp2SequenceGroupedByPlane()) {
         return;
     }
 
-    std::cout << "[UserStudy][Exp2] Regrouping sequence into plane-specific blocks (X/Y/Z, 60 trials each)." << std::endl;
+    std::cout << "[UserStudy][Exp2] Regrouping sequence into plane-specific blocks (X/Y/Z + combined angles)." << std::endl;
     regroupExp2SequenceByPlane(true);
     if (isExp2SequenceGroupedByPlane()) {
         saveExp2Sequence(getExp2SequenceFilename());
@@ -514,19 +655,16 @@ int UserStudyManager::findExp2GroupStartIndex(Exp2Plane plane) const
         return -1;
     }
 
-    if (kExp2TrialsPerGroup > 0) {
-        for (size_t start = 0; start + kExp2TrialsPerGroup <= m_exp2Sequence.size(); start += kExp2TrialsPerGroup) {
-            bool allMatch = true;
-            for (size_t i = start; i < start + kExp2TrialsPerGroup; ++i) {
-                if (m_exp2Sequence[i].plane != plane) {
-                    allMatch = false;
-                    break;
-                }
-            }
-            if (allMatch) {
-                return static_cast<int>(start);
-            }
+    int offset = 0;
+    int groupCount = getExp2GroupCount();
+    for (int g = 0; g < groupCount; ++g) {
+        int size = getExp2GroupSize(g);
+        if (size <= 0) break;
+        if (offset < static_cast<int>(m_exp2Sequence.size()) &&
+            m_exp2Sequence[offset].plane == plane) {
+            return offset;
         }
+        offset += size;
     }
 
     for (size_t i = 0; i < m_exp2Sequence.size(); ++i) {
@@ -550,8 +688,7 @@ void UserStudyManager::setManualExp2Group(Exp2Plane plane)
         return;
     }
 
-    int perGroup = getExp2TrialsPerGroup();
-    int groupIdx = (perGroup > 0) ? (startIdx / perGroup) : 0;
+    int groupIdx = getExp2GroupIndexForTrial(startIdx);
     ensureExp2GroupProgressSize();
     int trialOffset = (groupIdx >= 0 && groupIdx < static_cast<int>(m_exp2GroupProgress.size()))
         ? m_exp2GroupProgress[groupIdx]
@@ -559,10 +696,11 @@ void UserStudyManager::setManualExp2Group(Exp2Plane plane)
     int groupSize = getExp2GroupSize(groupIdx);
     if (trialOffset > groupSize) trialOffset = groupSize;
     m_exp2CurrentGroup = groupIdx;
-    m_exp2CurrentTrialIndex = startIdx + trialOffset;
+    int groupStart = getExp2GroupStartIndex(groupIdx);
+    m_exp2CurrentTrialIndex = groupStart + trialOffset;
     if (m_exp2CurrentTrialIndex >= static_cast<int>(m_exp2Sequence.size())) {
         if (groupSize > 0) {
-            m_exp2CurrentTrialIndex = startIdx + groupSize - 1;
+            m_exp2CurrentTrialIndex = groupStart + groupSize - 1;
         }
         else {
             m_exp2CurrentTrialIndex = static_cast<int>(m_exp2Sequence.size()) - 1;
@@ -572,8 +710,10 @@ void UserStudyManager::setManualExp2Group(Exp2Plane plane)
     m_exp2TrialActive = false;
     m_exp2NeedBreak = false;
     m_exp2CurrentTrial.plane = plane;
-    m_exp2CurrentTrial.targetAngleDeg = 0.0;
-    m_exp2CurrentTrial.userAngleDeg = 0.0;
+    m_exp2CurrentTrial.targetPlaneRotationDeg = 0.0;
+    m_exp2CurrentTrial.targetInPlaneAngleDeg = 0.0;
+    m_exp2CurrentTrial.userPlaneRotationDeg = 0.0;
+    m_exp2CurrentTrial.userInPlaneAngleDeg = 0.0;
     bool remaining = hasNextTrialExp2();
     m_exp2State = remaining ? ExperimentState::READY : ExperimentState::EXPERIMENT_COMPLETE;
 
@@ -728,30 +868,27 @@ bool UserStudyManager::loadProgress(const std::string& filename)
         }
     }
 
-    int perGroup = getExp2TrialsPerGroup();
     int exp2GroupCount = getExp2GroupCount();
     if (exp2CurrentTrialFlat >= 0) {
         m_exp2CurrentTrialIndex = exp2CurrentTrialFlat;
     }
     if (m_exp2GroupProgress.empty() && exp2GroupCount > 0) {
         m_exp2GroupProgress.resize(exp2GroupCount, 0);
-        if (perGroup > 0) {
-            int completedGroups = m_exp2CurrentTrialIndex / perGroup;
-            int idxInGroup = m_exp2CurrentTrialIndex % perGroup;
-            for (int g = 0; g < exp2GroupCount; ++g) {
-                if (g < completedGroups) {
-                    m_exp2GroupProgress[g] = getExp2GroupSize(g);
-                }
-                else if (g == completedGroups) {
-                    m_exp2GroupProgress[g] = idxInGroup;
-                }
+        int remaining = m_exp2CurrentTrialIndex;
+        for (int g = 0; g < exp2GroupCount; ++g) {
+            int size = getExp2GroupSize(g);
+            if (remaining >= size) {
+                m_exp2GroupProgress[g] = size;
+                remaining -= size;
+            }
+            else {
+                m_exp2GroupProgress[g] = std::max(0, remaining);
+                remaining = 0;
             }
         }
     }
     if (m_exp2CurrentGroup < 0 || m_exp2CurrentGroup >= exp2GroupCount) {
-        if (perGroup > 0) {
-            m_exp2CurrentGroup = m_exp2CurrentTrialIndex / perGroup;
-        }
+        m_exp2CurrentGroup = getExp2GroupIndexForTrial(m_exp2CurrentTrialIndex);
         if (m_exp2CurrentGroup < 0 || m_exp2CurrentGroup >= exp2GroupCount) {
             m_exp2CurrentGroup = 0;
         }
@@ -760,7 +897,7 @@ bool UserStudyManager::loadProgress(const std::string& filename)
         int grpProg = m_exp2GroupProgress[m_exp2CurrentGroup];
         int grpSize = getExp2GroupSize(m_exp2CurrentGroup);
         if (grpProg > grpSize) grpProg = grpSize;
-        int computedIndex = m_exp2CurrentGroup * getExp2TrialsPerGroup() + grpProg;
+        int computedIndex = getExp2GroupStartIndex(m_exp2CurrentGroup) + grpProg;
         if (computedIndex < static_cast<int>(m_exp2Sequence.size())) {
             m_exp2CurrentTrialIndex = computedIndex;
         }
@@ -1223,7 +1360,7 @@ void UserStudyManager::startNextTrialExp2()
     }
 
     m_exp2CurrentGroup = targetGroup;
-    int groupStart = targetGroup * getExp2TrialsPerGroup();
+    int groupStart = getExp2GroupStartIndex(targetGroup);
     int trialIdx = groupStart + grpProg;
     if (trialIdx < 0 || trialIdx >= static_cast<int>(m_exp2Sequence.size())) {
         m_exp2State = ExperimentState::EXPERIMENT_COMPLETE;
@@ -1235,7 +1372,10 @@ void UserStudyManager::startNextTrialExp2()
     const auto& cfg = m_exp2Sequence[m_exp2CurrentTrialIndex];
     m_exp2CurrentTrial.trialNumber = m_exp2CurrentTrialIndex;
     m_exp2CurrentTrial.plane = cfg.plane;
-    m_exp2CurrentTrial.targetAngleDeg = cfg.angleDeg;
+    m_exp2CurrentTrial.targetPlaneRotationDeg = cfg.planeRotationDeg;
+    m_exp2CurrentTrial.targetInPlaneAngleDeg = cfg.inPlaneAngleDeg;
+    m_exp2CurrentTrial.userPlaneRotationDeg = 0.0;
+    m_exp2CurrentTrial.userInPlaneAngleDeg = 0.0;
     m_exp2CurrentTrial.trialStartTime = std::chrono::steady_clock::now();
     m_exp2TrialStart = m_exp2CurrentTrial.trialStartTime;
     m_exp2TrialActive = true;
@@ -1243,7 +1383,7 @@ void UserStudyManager::startNextTrialExp2()
     m_exp2NeedBreak = false;
 }
 
-void UserStudyManager::recordExp2UserAngle(double userAngleDeg, double durationSeconds)
+void UserStudyManager::recordExp2UserPose(double planeSpinDeg, double inPlaneAngleDeg, double durationSeconds)
 {
     if (!m_exp2TrialActive) {
         std::cout << "[UserStudy][Exp2] No active trial to record.\n";
@@ -1254,7 +1394,8 @@ void UserStudyManager::recordExp2UserAngle(double userAngleDeg, double durationS
     if (durationSeconds <= 0.0) {
         durationSeconds = std::chrono::duration<double>(m_exp2CurrentTrial.confirmTime - m_exp2TrialStart).count();
     }
-    m_exp2CurrentTrial.userAngleDeg = userAngleDeg;
+    m_exp2CurrentTrial.userPlaneRotationDeg = planeSpinDeg;
+    m_exp2CurrentTrial.userInPlaneAngleDeg = inPlaneAngleDeg;
     m_exp2CurrentTrial.durationSeconds = durationSeconds;
     m_exp2Results.push_back(m_exp2CurrentTrial);
     if (m_exp2CsvFileReady) {
@@ -1263,9 +1404,8 @@ void UserStudyManager::recordExp2UserAngle(double userAngleDeg, double durationS
 
     m_exp2TrialActive = false;
 
-    int perGroup = getExp2TrialsPerGroup();
-    int groupIdx = (perGroup > 0) ? (m_exp2CurrentTrial.trialNumber / perGroup) : 0;
-    int trialInGroup = (perGroup > 0) ? (m_exp2CurrentTrial.trialNumber % perGroup) : m_exp2CurrentTrial.trialNumber;
+    int groupIdx = getExp2GroupIndexForTrial(m_exp2CurrentTrial.trialNumber);
+    int trialInGroup = getExp2TrialOffsetInGroup(m_exp2CurrentTrial.trialNumber);
     int groupSize = getExp2GroupSize(groupIdx);
     int nextInGroup = trialInGroup + 1;
 
@@ -1297,7 +1437,7 @@ void UserStudyManager::recordExp2UserAngle(double userAngleDeg, double durationS
         }
         else {
             m_exp2CurrentGroup = nextGroup;
-            int nextStart = m_exp2CurrentGroup * getExp2TrialsPerGroup();
+            int nextStart = getExp2GroupStartIndex(m_exp2CurrentGroup);
             int nextOffset = (m_exp2CurrentGroup < static_cast<int>(m_exp2GroupProgress.size()))
                 ? m_exp2GroupProgress[m_exp2CurrentGroup]
                 : 0;
@@ -1307,22 +1447,31 @@ void UserStudyManager::recordExp2UserAngle(double userAngleDeg, double durationS
     saveProgress();
 }
 
+void UserStudyManager::recordExp2UserAngle(double userAngleDeg, double durationSeconds)
+{
+    recordExp2UserPose(0.0, userAngleDeg, durationSeconds);
+}
+
 // Legacy shim to keep existing Soft_gripper.cpp building while Exp2 UI is refactored.
 void UserStudyManager::recordExp2UserAngles(double userAngleX, double userAngleZ, double durationSeconds)
 {
-    // For the new single-angle design we only use one value; fall back to X as input.
-    recordExp2UserAngle(userAngleX, durationSeconds);
+    recordExp2UserPose(0.0, userAngleX, durationSeconds);
+}
+
+double UserStudyManager::getExp2TargetPlaneSpinDeg() const
+{
+    return m_exp2CurrentTrial.targetPlaneRotationDeg;
 }
 
 double UserStudyManager::getExp2TargetAngleDeg() const
 {
-    return m_exp2CurrentTrial.targetAngleDeg;
+    return m_exp2CurrentTrial.targetInPlaneAngleDeg;
 }
 
 // Legacy shims
 double UserStudyManager::getExp2TargetAngleX() const
 {
-    return m_exp2CurrentTrial.targetAngleDeg;
+    return m_exp2CurrentTrial.targetInPlaneAngleDeg;
 }
 
 double UserStudyManager::getExp2TargetAngleZ() const
@@ -1335,24 +1484,69 @@ int UserStudyManager::getExp2ExpectedTrialCount() const
     return static_cast<int>(getExp2ExpectedTrialCountInternal());
 }
 
-int UserStudyManager::getExp2TrialsPerGroup() const
+int UserStudyManager::getExp2TrialsPerGroup(int groupIdx) const
 {
-    return static_cast<int>(kExp2TrialsPerGroup);
+    return getExp2GroupSize(groupIdx);
 }
 
 int UserStudyManager::getExp2GroupCount() const
 {
-    if (kExp2TrialsPerGroup == 0) return 0;
-    return static_cast<int>((m_exp2Sequence.size() + kExp2TrialsPerGroup - 1) / kExp2TrialsPerGroup);
+    if (m_exp2GroupSizes.empty()) {
+        return static_cast<int>(getDefaultExp2GroupSizes().size());
+    }
+    return static_cast<int>(m_exp2GroupSizes.size());
+}
+
+int UserStudyManager::getExp2GroupStartIndex(int groupIdx) const
+{
+    if (groupIdx <= 0) return 0;
+    int start = 0;
+    for (int i = 0; i < groupIdx && i < getExp2GroupCount(); ++i) {
+        start += getExp2GroupSize(i);
+    }
+    return start;
+}
+
+int UserStudyManager::getExp2GroupIndexForTrial(int flatTrialIndex) const
+{
+    if (flatTrialIndex < 0) return 0;
+    int start = 0;
+    for (int i = 0; i < getExp2GroupCount(); ++i) {
+        int size = getExp2GroupSize(i);
+        if (flatTrialIndex < start + size) {
+            return i;
+        }
+        start += size;
+    }
+    return std::max(0, getExp2GroupCount() - 1);
+}
+
+int UserStudyManager::getExp2TrialOffsetInGroup(int flatTrialIndex) const
+{
+    if (flatTrialIndex < 0) return 0;
+    int start = 0;
+    for (int i = 0; i < getExp2GroupCount(); ++i) {
+        int size = getExp2GroupSize(i);
+        if (flatTrialIndex < start + size) {
+            return flatTrialIndex - start;
+        }
+        start += size;
+    }
+    return 0;
 }
 
 int UserStudyManager::getExp2GroupSize(int groupIdx) const
 {
     if (groupIdx < 0) return 0;
-    size_t start = static_cast<size_t>(groupIdx) * kExp2TrialsPerGroup;
-    if (start >= m_exp2Sequence.size()) return 0;
-    size_t remaining = m_exp2Sequence.size() - start;
-    return static_cast<int>(std::min<size_t>(kExp2TrialsPerGroup, remaining));
+    if (groupIdx < static_cast<int>(m_exp2GroupSizes.size())) {
+        return m_exp2GroupSizes[groupIdx];
+    }
+
+    auto defaults = getDefaultExp2GroupSizes();
+    if (groupIdx < static_cast<int>(defaults.size())) {
+        return defaults[groupIdx];
+    }
+    return 0;
 }
 
 int UserStudyManager::getExp2CompletedTrials() const
@@ -1492,7 +1686,7 @@ void UserStudyManager::createOrLoadUserCSVExp2()
             m_exp2CsvFileReady = false;
             return;
         }
-        file << "TrialNumber,GroupIndex,TrialInGroup,Plane,TargetAngleDeg,UserAngleDeg,DurationSeconds\n";
+        file << "TrialNumber,GroupIndex,TrialInGroup,Plane,TargetPlaneSpinDeg,TargetAngleDeg,UserPlaneSpinDeg,UserAngleDeg,DurationSeconds\n";
         file.close();
     }
 
@@ -1507,18 +1701,16 @@ void UserStudyManager::writeExp2TrialToCSV(const AngleTrialResult& trial)
         std::cerr << "[UserStudy][Exp2] ERROR: Cannot open CSV for writing\n";
         return;
     }
-    int groupIdx = (getExp2TrialsPerGroup() > 0)
-        ? (trial.trialNumber / getExp2TrialsPerGroup())
-        : 0;
-    int trialInGroup = (getExp2TrialsPerGroup() > 0)
-        ? (trial.trialNumber % getExp2TrialsPerGroup())
-        : trial.trialNumber;
+    int groupIdx = getExp2GroupIndexForTrial(trial.trialNumber);
+    int trialInGroup = getExp2TrialOffsetInGroup(trial.trialNumber);
     file << (trial.trialNumber + 1) << ","
         << (groupIdx + 1) << ","
         << (trialInGroup + 1) << ","
         << static_cast<int>(trial.plane) << ","
-        << std::fixed << std::setprecision(2) << trial.targetAngleDeg << ","
-        << trial.userAngleDeg << ","
+        << std::fixed << std::setprecision(2) << trial.targetPlaneRotationDeg << ","
+        << trial.targetInPlaneAngleDeg << ","
+        << trial.userPlaneRotationDeg << ","
+        << trial.userInPlaneAngleDeg << ","
         << std::fixed << std::setprecision(3) << trial.durationSeconds << "\n";
     file.close();
 }

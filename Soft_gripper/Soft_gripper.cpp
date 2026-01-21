@@ -77,10 +77,13 @@ cShapeLine* g_exp2Line = nullptr;
 cShapeLine* g_exp2ForceLine = nullptr;
 std::atomic<double> g_exp2PendingAngleDeg{ 0.0 };
 std::atomic<bool> g_exp2AnglePending{ false };
-cMatrix3d g_exp2PlaneBaseRot;
+cMatrix3d g_exp2UserPlaneBaseRot;
+cMatrix3d g_exp2TargetPlaneBaseRot;
 cMatrix3d g_exp2PlaneInitialRot;
 cVector3d g_exp2ForceDirWorld(1.0, 0.0, 0.0);
 double g_exp2ForceDisplayMagnitudeMM = 15.0;
+double g_exp2UserPlaneSpinDeg = 0.0;
+double g_exp2TargetPlaneSpinDeg = 0.0;
 cMesh* leftCubeHighlight = nullptr;
 cMesh* rightCubeHighlight = nullptr;
 const double kHighlightThickness = 0.0005;
@@ -266,6 +269,7 @@ cMatrix3d getRotationForExp2Plane(Exp2Plane plane)
 	rot.identity();
 	switch (plane) {
 	case Exp2Plane::PLANE_X: // normal along +X
+	case Exp2Plane::PLANE_COMBINED: // start from X-plane, allow extra spin
 		rot.rotateAboutGlobalAxisDeg(cVector3d(0.0, 1.0, 0.0), 90.0);
 		break;
 	case Exp2Plane::PLANE_Y: // normal along +Y
@@ -283,6 +287,7 @@ std::string exp2PlaneToString(Exp2Plane plane)
 	switch (plane) {
 	case Exp2Plane::PLANE_X: return "X-plane (normal +X)";
 	case Exp2Plane::PLANE_Y: return "Y-plane (normal +Y)";
+	case Exp2Plane::PLANE_COMBINED: return "Combined 3D angles (rotating X-plane)";
 	case Exp2Plane::PLANE_Z:
 	default: return "Z-plane (normal +Z)";
 	}
@@ -365,11 +370,11 @@ void updateExperimentCamera(FeedbackDirection direction)
 }
 
 void showExperiment2Objects(bool show)
-{
-	std::lock_guard<std::mutex> lock(g_sceneMutex);
-	// Hide the shared base while running Experiment 2
-	if (base) base->setEnabled(false);
-	bool trialActive = show && userStudy && userStudy->isExp2TrialActive();
+	{
+		std::lock_guard<std::mutex> lock(g_sceneMutex);
+		// Hide the shared base while running Experiment 2
+		if (base) base->setEnabled(false);
+		bool trialActive = show && userStudy && userStudy->isExp2TrialActive();
 	if (g_exp2Plane) g_exp2Plane->setEnabled(trialActive);
 	if (g_exp2Line) g_exp2Line->setEnabled(trialActive);
 	bool forceLineVisible = trialActive && g_exp2DebugMode;
@@ -392,7 +397,8 @@ void showExperiment2Objects(bool show)
 void applyExp2UserAngle()
 {
 	// Apply user angle relative to the initial plane orientation
-	g_exp2PlaneBaseRot = g_exp2PlaneInitialRot;
+	g_exp2UserPlaneBaseRot = g_exp2PlaneInitialRot;
+	g_exp2UserPlaneBaseRot.rotateAboutGlobalAxisDeg(cVector3d(0.0, 0.0, 1.0), g_exp2UserPlaneSpinDeg);
 	g_exp2PendingAngleDeg.store(g_exp2UserAngleDeg, std::memory_order_relaxed);
 	g_exp2AnglePending.store(true, std::memory_order_release);
 }
@@ -410,10 +416,15 @@ void processPendingExp2AngleLocked()
 
 	double angleDeg = g_exp2PendingAngleDeg.load(std::memory_order_relaxed);
 
-	cVector3d normal = g_exp2PlaneBaseRot * cVector3d(0.0, 0.0, 1.0);
-	applyExp2RotationToMesh(g_exp2Line, g_exp2PlaneBaseRot, angleDeg);
+	const cVector3d planeCenter = g_exp2Plane->getLocalPos();
+	if (g_exp2Plane) {
+		g_exp2Plane->setLocalRot(g_exp2UserPlaneBaseRot);
+	}
+
+	cVector3d normal = g_exp2UserPlaneBaseRot * cVector3d(0.0, 0.0, 1.0);
+	applyExp2RotationToMesh(g_exp2Line, g_exp2UserPlaneBaseRot, angleDeg);
 	if (g_exp2Line) {
-		g_exp2Line->setLocalPos(normal * kExp2LineLift);
+		g_exp2Line->setLocalPos(planeCenter + normal * kExp2LineLift);
 	}
 
 	g_exp2AnglePending.store(false, std::memory_order_release);
@@ -428,9 +439,10 @@ void flushPendingExp2Angle()
 void updateExp2ForceLineLocked()
 {
 	if (!g_exp2ForceLine) return;
-	cVector3d normal = g_exp2PlaneBaseRot * cVector3d(0.0, 0.0, 1.0);
-	applyExp2RotationToMesh(g_exp2ForceLine, g_exp2PlaneBaseRot, g_exp2TargetAngleDeg);
-	g_exp2ForceLine->setLocalPos(normal * kExp2LineLift);
+	cVector3d planeCenter = (g_exp2Plane) ? g_exp2Plane->getLocalPos() : kExp2PlaneCenter;
+	cVector3d normal = g_exp2TargetPlaneBaseRot * cVector3d(0.0, 0.0, 1.0);
+	applyExp2RotationToMesh(g_exp2ForceLine, g_exp2TargetPlaneBaseRot, g_exp2TargetAngleDeg);
+	g_exp2ForceLine->setLocalPos(planeCenter + normal * kExp2LineLift);
 }
 
 void updateExp2ForceLine()
@@ -449,23 +461,29 @@ bool startNextExp2Trial()
 
 	userStudy->startNextTrialExp2();
 	g_exp2TargetAngleDeg = userStudy->getExp2TargetAngleDeg();
+	g_exp2TargetPlaneSpinDeg = userStudy->getExp2TargetPlaneSpinDeg();
 	Exp2Plane plane = userStudy->getExp2Plane();
 	g_exp2UserAngleDeg = 0.0;
+	g_exp2UserPlaneSpinDeg = 0.0;
 	g_exp2ActiveTrialNumber = userStudy->getExp2CurrentTrialIndex();
 	g_exp2TrialStartTime = std::chrono::steady_clock::now();
 
+	cMatrix3d planeBaseRot = getRotationForExp2Plane(plane);
 	{
 		std::lock_guard<std::mutex> lock(g_sceneMutex);
+		g_exp2PlaneInitialRot = planeBaseRot;
+		g_exp2UserPlaneBaseRot = g_exp2PlaneInitialRot;
+		g_exp2UserPlaneBaseRot.rotateAboutGlobalAxisDeg(cVector3d(0.0, 0.0, 1.0), g_exp2UserPlaneSpinDeg);
+		g_exp2TargetPlaneBaseRot = g_exp2PlaneInitialRot;
+		g_exp2TargetPlaneBaseRot.rotateAboutGlobalAxisDeg(cVector3d(0.0, 0.0, 1.0), g_exp2TargetPlaneSpinDeg);
 		if (g_exp2Plane) {
-			g_exp2PlaneInitialRot = getRotationForExp2Plane(plane);
-			g_exp2PlaneBaseRot = g_exp2PlaneInitialRot;
-			g_exp2Plane->setLocalRot(g_exp2PlaneInitialRot);
+			g_exp2Plane->setLocalRot(g_exp2UserPlaneBaseRot);
 		}
 		if (g_exp2Line) {
-			g_exp2Line->setLocalRot(g_exp2PlaneInitialRot);
+			g_exp2Line->setLocalRot(g_exp2UserPlaneBaseRot);
 		}
 		if (g_exp2ForceLine) {
-			g_exp2ForceLine->setLocalRot(g_exp2PlaneInitialRot);
+			g_exp2ForceLine->setLocalRot(g_exp2TargetPlaneBaseRot);
 			updateExp2ForceLineLocked();
 		}
 	}
@@ -481,13 +499,28 @@ void updateExperiment2Labels(const std::string& status)
 {
 	if (!userStudy) return;
 
+	int groupCount = userStudy->getExp2GroupCount();
+	int sizeX = (groupCount > 0) ? userStudy->getExp2GroupSize(0) : 0;
+	int sizeY = (groupCount > 1) ? userStudy->getExp2GroupSize(1) : 0;
+	int sizeZ = (groupCount > 2) ? userStudy->getExp2GroupSize(2) : 0;
+	int sizeCombo = (groupCount > 3) ? userStudy->getExp2GroupSize(3) : 0;
+
 	if (labelExperimentInstructions) {
 		std::ostringstream oss;
 		oss << "ANGLE MATCHING EXPERIMENT (single plane + line)\n";
-		oss << "Controls: Left/Right adjust line angle (" << kExp2AngleStepDeg << " deg step)\n";
+		oss << "Controls: Left/Right adjust line angle (" << kExp2AngleStepDeg << " deg step)";
+		if (sizeCombo > 0) {
+			oss << "; Up/Down rotate plane about Z in combined group\n";
+		}
+		else {
+			oss << "\n";
+		}
 		oss << "Press SPACE to confirm, 'T' for next trial, 'R' to exit, 'E' for Experiment 1.\n";
-		oss << "Manual groups: 5=X-plane, 6=Y-plane, 7=Z-plane ("
-			<< userStudy->getExp2TrialsPerGroup() << " trials each)\n";
+		oss << "Manual groups: 5=X-plane(" << sizeX << "), 6=Y-plane(" << sizeY << "), 7=Z-plane(" << sizeZ << ")";
+		if (sizeCombo > 0) {
+			oss << ", 8=Combined(" << sizeCombo << ")";
+		}
+		oss << "\n";
 		if (!status.empty()) {
 			oss << status << "\n";
 		}
@@ -522,12 +555,6 @@ void updateExperiment2Labels(const std::string& status)
 		std::ostringstream info;
 		int total = userStudy->getExp2TotalTrials();
 		if (total <= 0) total = userStudy->getExp2ExpectedTrialCount();
-		int perGroup = userStudy->getExp2TrialsPerGroup();
-		if (perGroup <= 0) perGroup = total;
-		int groupCount = userStudy->getExp2GroupCount();
-		if (groupCount <= 0 && perGroup > 0) {
-			groupCount = (perGroup > 0) ? ((total + perGroup - 1) / perGroup) : 0;
-		}
 		int completedTrials = userStudy->getExp2CompletedTrials();
 		if (userStudy->getExp2State() == ExperimentState::EXPERIMENT_COMPLETE) {
 			completedTrials = total;
@@ -540,25 +567,14 @@ void updateExperiment2Labels(const std::string& status)
 			displayTrial = total;
 		}
 		int shownIndex = displayTrial;
-		if (total <= 0) {
-			shownIndex = 0;
-		}
-		else {
-			if (shownIndex >= total) shownIndex = total - 1;
-			if (shownIndex < 0) shownIndex = 0;
-		}
-		int trialInGroup = (perGroup > 0) ? (shownIndex % perGroup) : shownIndex;
-		int groupIndex = (perGroup > 0) ? (shownIndex / perGroup) : 0;
-		if (groupCount > 0 && groupIndex >= groupCount) groupIndex = groupCount - 1;
-		int groupSize = perGroup;
-		if (groupCount > 0 && perGroup > 0) {
-			int remaining = total - groupIndex * perGroup;
-			if (remaining < groupSize) groupSize = remaining;
-		}
-		if (groupSize <= 0) groupSize = perGroup;
-		if (groupSize > 0 && trialInGroup >= groupSize) {
-			trialInGroup = groupSize - 1;
-		}
+		if (total <= 0) total = 0;
+		if (shownIndex >= total && total > 0) shownIndex = total - 1;
+		if (shownIndex < 0) shownIndex = 0;
+		int groupIndex = userStudy->getExp2GroupIndexForTrial(shownIndex);
+		if (groupIndex < 0) groupIndex = 0;
+		int groupSize = userStudy->getExp2GroupSize(groupIndex);
+		int trialInGroup = userStudy->getExp2TrialOffsetInGroup(shownIndex);
+		if (groupSize <= 0) groupSize = 1;
 
 		if (groupCount > 0) {
 			info << "Group: " << (groupIndex + 1) << "/" << groupCount << " | ";
@@ -569,9 +585,13 @@ void updateExperiment2Labels(const std::string& status)
 		}
 		info << "Overall Done: " << completedTrials << "/" << total << "\n";
 		info << exp2PlaneToString(userStudy->getExp2Plane()) << "\n";
-		info << "Target Angle: "
+		info << "Target Spin: "
 			<< std::fixed << std::setprecision(1)
+			<< g_exp2TargetPlaneSpinDeg << " deg | ";
+		info << "Target Angle: "
 			<< g_exp2TargetAngleDeg << " deg\n";
+		info << "Current Spin: "
+			<< g_exp2UserPlaneSpinDeg << " deg | ";
 		info << "Current Angle: "
 			<< g_exp2UserAngleDeg << " deg";
 		labelTrialInfo->setText(info.str());
@@ -581,9 +601,8 @@ void updateExperiment2Labels(const std::string& status)
 		if (g_exp2DebugMode && g_activeExperiment == ExperimentType::EXPERIMENT2) {
 			std::ostringstream dbg;
 			dbg << "DEBUG\n" << exp2PlaneToString(userStudy->getExp2Plane()) << "\n";
-			dbg << "Target: " << g_exp2TargetAngleDeg << " deg\n";
-			dbg << "User  : " << g_exp2UserAngleDeg << " deg\n";
-			dbg << "Delta : " << (g_exp2UserAngleDeg - g_exp2TargetAngleDeg) << " deg\n";
+			dbg << "Target spin: " << g_exp2TargetPlaneSpinDeg << " deg | Target angle: " << g_exp2TargetAngleDeg << " deg\n";
+			dbg << "User   spin: " << g_exp2UserPlaneSpinDeg << " deg | User   angle: " << g_exp2UserAngleDeg << " deg\n";
 			dbg << "Force dir (world): "
 				<< std::fixed << std::setprecision(2)
 				<< g_exp2ForceDirWorld.x() << ", "
@@ -1709,7 +1728,10 @@ applyDefaultCameraView();
 	g_exp2Plane->setUseTransparency(true);
 	g_exp2Plane->m_material->setTransparencyLevel(0.2);
 	g_exp2PlaneInitialRot = g_exp2Plane->getLocalRot();
-	g_exp2PlaneBaseRot = g_exp2PlaneInitialRot;
+	g_exp2UserPlaneBaseRot = g_exp2PlaneInitialRot;
+	g_exp2TargetPlaneBaseRot = g_exp2PlaneInitialRot;
+	g_exp2UserPlaneSpinDeg = 0.0;
+	g_exp2TargetPlaneSpinDeg = 0.0;
 	g_exp2Plane->setUseDisplayList(true);
 	g_exp2Plane->setHapticEnabled(false);
 	g_exp2Plane->setEnabled(false);
@@ -1719,6 +1741,7 @@ applyDefaultCameraView();
 	g_exp2Line->m_colorPointB.setRedDark();
 	g_exp2Line->setLineWidth(15.0);
 	world->addChild(g_exp2Line);
+	g_exp2Line->setLocalPos(kExp2PlaneCenter);
 	g_exp2Line->setEnabled(false);
 
 	g_exp2ForceLine = new cShapeLine(cVector3d(0, 0, 0), cVector3d(kExp2LineLength, 0, 0));
@@ -1726,6 +1749,7 @@ applyDefaultCameraView();
 	g_exp2ForceLine->m_colorPointB.setGreenChartreuse();
 	g_exp2ForceLine->setLineWidth(3.0);
 	world->addChild(g_exp2ForceLine);
+	g_exp2ForceLine->setLocalPos(kExp2PlaneCenter);
 	g_exp2ForceLine->setEnabled(false);
 
 
@@ -1997,13 +2021,19 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 		if (userStudy && userStudy->isExp2TrialActive()) {
 			double delta = (a_key == GLFW_KEY_LEFT) ? -kExp2AngleStepDeg : kExp2AngleStepDeg;
 			g_exp2UserAngleDeg = wrapAngle360(g_exp2UserAngleDeg + delta);
-			{
-				std::lock_guard<std::mutex> lock(g_sceneMutex);
-				g_exp2PlaneBaseRot = g_exp2PlaneInitialRot;
-				g_exp2PendingAngleDeg.store(g_exp2UserAngleDeg, std::memory_order_relaxed);
-				g_exp2AnglePending.store(true, std::memory_order_release);
-			}
-			// Apply immediately so the line responds even if the haptics loop is paused
+			applyExp2UserAngle();
+			flushPendingExp2Angle();
+			updateExperiment2Labels();
+		}
+	}
+	else if (g_activeExperiment == ExperimentType::EXPERIMENT2 &&
+		(a_key == GLFW_KEY_UP || a_key == GLFW_KEY_DOWN))
+	{
+		if (userStudy && userStudy->isExp2TrialActive() &&
+			userStudy->getExp2Plane() == Exp2Plane::PLANE_COMBINED) {
+			double delta = (a_key == GLFW_KEY_UP) ? kExp2AngleStepDeg : -kExp2AngleStepDeg;
+			g_exp2UserPlaneSpinDeg = wrapAngle360(g_exp2UserPlaneSpinDeg + delta);
+			applyExp2UserAngle();
 			flushPendingExp2Angle();
 			updateExperiment2Labels();
 		}
@@ -2012,7 +2042,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 	{
 		if (userStudy && userStudy->isExp2TrialActive()) {
 			double duration = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_exp2TrialStartTime).count();
-			userStudy->recordExp2UserAngle(g_exp2UserAngleDeg, duration);
+			userStudy->recordExp2UserPose(g_exp2UserPlaneSpinDeg, g_exp2UserAngleDeg, duration);
 			g_exp2ActiveTrialNumber = -1;
 			std::string msg = userStudy->isExp2BreakPending() ?
 				"Trial recorded. Break time! Press 'T' when ready." :
@@ -2221,6 +2251,8 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 				userStudy->setManualExp2Group(Exp2Plane::PLANE_X);
 				g_exp2TargetAngleDeg = 0.0;
 				g_exp2UserAngleDeg = 0.0;
+				g_exp2UserPlaneSpinDeg = 0.0;
+				g_exp2TargetPlaneSpinDeg = 0.0;
 				g_exp2ActiveTrialNumber = -1;
 				updateExperiment2Labels("Switched to X-plane group. Press 'T' to start trials.");
 			}
@@ -2251,6 +2283,8 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 				userStudy->setManualExp2Group(Exp2Plane::PLANE_Y);
 				g_exp2TargetAngleDeg = 0.0;
 				g_exp2UserAngleDeg = 0.0;
+				g_exp2UserPlaneSpinDeg = 0.0;
+				g_exp2TargetPlaneSpinDeg = 0.0;
 				g_exp2ActiveTrialNumber = -1;
 				updateExperiment2Labels("Switched to Y-plane group. Press 'T' to start trials.");
 			}
@@ -2281,6 +2315,8 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 				userStudy->setManualExp2Group(Exp2Plane::PLANE_Z);
 				g_exp2TargetAngleDeg = 0.0;
 				g_exp2UserAngleDeg = 0.0;
+				g_exp2UserPlaneSpinDeg = 0.0;
+				g_exp2TargetPlaneSpinDeg = 0.0;
 				g_exp2ActiveTrialNumber = -1;
 				updateExperiment2Labels("Switched to Z-plane group. Press 'T' to start trials.");
 			}
@@ -2302,6 +2338,18 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 				std::cout << "Mode: F-P, Direction: Z (Vertical Up/Down)" << std::endl;
 				std::cout << "Press 'T' to start trials" << std::endl;
 			}
+		}
+	}
+	else if (a_key == GLFW_KEY_8 && g_activeExperiment == ExperimentType::EXPERIMENT2)
+	{
+		if (userStudy) {
+			userStudy->setManualExp2Group(Exp2Plane::PLANE_COMBINED);
+			g_exp2TargetAngleDeg = 0.0;
+			g_exp2UserAngleDeg = 0.0;
+			g_exp2UserPlaneSpinDeg = 0.0;
+			g_exp2TargetPlaneSpinDeg = 0.0;
+			g_exp2ActiveTrialNumber = -1;
+			updateExperiment2Labels("Switched to combined group. Press 'T' to start trials.");
 		}
 	}
 	else if (a_key == GLFW_KEY_8 && experimentMode)
@@ -3315,7 +3363,7 @@ else if (g_activeExperiment == ExperimentType::EXPERIMENT2 &&
 	cMatrix3d planeRot;
 	{
 		std::lock_guard<std::mutex> lock(g_sceneMutex);
-		planeRot = g_exp2PlaneBaseRot;
+		planeRot = g_exp2TargetPlaneBaseRot;
 	}
 	cMatrix3d rot = planeRot;
 	const cVector3d normal = planeRot * cVector3d(0.0, 0.0, 1.0);
