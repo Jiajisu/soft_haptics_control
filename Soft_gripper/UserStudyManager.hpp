@@ -40,6 +40,7 @@ struct AngleTrialResult {
     double userPlaneRotationDeg;
     double userInPlaneAngleDeg;
     double durationSeconds;
+    int forceCueCount = 0;
     std::chrono::steady_clock::time_point trialStartTime;
     std::chrono::steady_clock::time_point confirmTime;
 };
@@ -106,6 +107,7 @@ public:
     void recordExp2UserPose(double planeSpinDeg, double inPlaneAngleDeg, double durationSeconds);
     void recordExp2UserAngle(double userAngleDeg, double durationSeconds); // legacy shim, uses current plane spin
     void recordExp2UserAngles(double userAngleX, double userAngleZ, double durationSeconds); // legacy shim
+    void incrementExp2ForceCueCount();
     double getExp2TargetPlaneSpinDeg() const;
     double getExp2TargetAngleDeg() const;
     double getExp2TargetAngleX() const; // legacy shim

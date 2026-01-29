@@ -2054,6 +2054,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 	else if (g_activeExperiment == ExperimentType::EXPERIMENT2 && a_key == GLFW_KEY_F)
 	{
 		if (userStudy && userStudy->isExp2TrialActive()) {
+			userStudy->incrementExp2ForceCueCount();
 			startExp2ForcePulse();
 			updateExperiment2Labels("Force cue playing for 2 seconds.");
 		}
