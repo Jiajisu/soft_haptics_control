@@ -1,4 +1,4 @@
-﻿#ifndef USER_STUDY_MANAGER_HPP
+#ifndef USER_STUDY_MANAGER_HPP
 #define USER_STUDY_MANAGER_HPP
 
 #include "chai3d.h"
@@ -16,15 +16,57 @@ enum class ExperimentType { NONE, EXPERIMENT1, EXPERIMENT2 };
 enum class Exp2Plane { PLANE_X, PLANE_Y, PLANE_Z, PLANE_COMBINED };
 
 enum class ExperimentState {
-    NOT_STARTED,      // 未开始
-    READY,           // 准备就绪
-    IN_PROGRESS,     // 进行中
-    TRIAL_COMPLETE,  // 试次完成，等待下一个
-    GROUP_COMPLETE,  // 组完成
-    EXPERIMENT_COMPLETE  // 实验完成
+    NOT_STARTED,      // ???
+    READY,           // ????
+    IN_PROGRESS,     // ???
+    TRIAL_COMPLETE,  // ????,?????
+    GROUP_COMPLETE,  // ???
+    EXPERIMENT_COMPLETE  // ????
 };
 
 enum class SurfacePolarity { POSITIVE = 1, NEGATIVE = -1 };
+
+struct StaircaseState {
+    double currentKComp = 0.0;
+    double currentStep = 0.0;
+    int reversalCount = 0;
+    int trialCount = 0;
+    int correctStreak = 0;
+    int lastMoveDir = 0;
+};
+
+class AdaptiveStaircase {
+public:
+    AdaptiveStaircase(double kRef,
+        double startKComp,
+        double minKComp,
+        double maxKComp,
+        double startStep,
+        double fineStep,
+        int switchAfterReversals = 2,
+        int targetReversals = 10);
+
+    double getNextKComp() const;
+    double getDeltaK() const;
+    double getStepSize() const;
+    void update(bool isCorrect);
+    bool shouldStop() const;
+    StaircaseState getState() const { return m_state; }
+    void setState(const StaircaseState& state);
+
+private:
+    double clampK(double k) const;
+    void refreshStep();
+
+    double m_kRef;
+    double m_minKComp;
+    double m_maxKComp;
+    double m_startStep;
+    double m_fineStep;
+    int m_switchAfterReversals;
+    int m_targetReversals;
+    StaircaseState m_state;
+};
 
 struct AngleTrialConfig {
     Exp2Plane plane;
@@ -47,27 +89,37 @@ struct AngleTrialResult {
 
 struct TrialResult {
     int trialNumber;
+    int groupIndex;
+    int trialInGroup;
     double referenceStiffness;
     double comparisonStiffness;
     int userChoice;
+    int correctChoice;
+    bool isCorrect;
     double reactionTime;
     SurfacePolarity polarity;
-    std::chrono::steady_clock::time_point trialStartTime;  // 按T时的时间
-    std::chrono::steady_clock::time_point choiceTime;      // 按1或2时的时间
+    bool referenceOnLeft;
+    double staircaseDeltaK;
+    double staircaseStep;
+    int staircaseReversals;
+    int staircaseTrialInGroup;
+    int staircaseId;
+    std::chrono::steady_clock::time_point trialStartTime;  // ?T????
+    std::chrono::steady_clock::time_point choiceTime;      // ?1?2????
 };
 
-// 新增：试次配置结构体
+// ??:???????
 struct TrialConfig {
-    int stiffnessIndex;  // 0-10 (对应11个刚度比例)
-    int repetition;      // 0-9 (每个刚度重复10次)
+    int stiffnessIndex;  // 0-10 (??11?????)
+    int repetition;      // 0-9 (??????10?)
     SurfacePolarity polarity;
 };
 
-// 新增：组配置结构体
+// ??:??????
 struct GroupConfig {
     InteractionMode mode;
     FeedbackDirection direction;
-    std::vector<TrialConfig> trials; // 110个试次
+    std::vector<TrialConfig> trials; // placeholder for legacy constant-stimuli configs
 };
 
 class UserStudyManager {
@@ -75,27 +127,31 @@ public:
     UserStudyManager();
     ~UserStudyManager();
 
-    /* --- 新增：流程管理 ------------------------------------------------- */
+    /* --- ??:???? ------------------------------------------------- */
     bool loadOrCreateUserSession(const std::string& userId);
     void saveProgress();
     bool loadProgress(const std::string& filename);
 
-    /* --- 试次/组控制 --------------------------------------------------- */
+    /* --- ??/??? --------------------------------------------------- */
     void setManualTrialGroup(InteractionMode mode, FeedbackDirection direction);
     void resetCurrentGroup();
     void sanitizeProgressIndices();
-    bool isGroupComplete() const { return m_currentTrialInGroup >= 110; }
+    bool isGroupComplete() const;
     int getCurrentTrialGroup() const { return m_currentTrialGroup; }
     int getCurrentTrialInGroup() const { return m_currentTrialInGroup; }
-    int getCurrentTrialNumber() const { return m_currentTrialGroup * 110 + m_currentTrialInGroup; }
+    int getCurrentTrialNumber() const { return m_currentTrial.trialNumber; }
 
-    /* --- 状态查询 ------------------------------------------------------- */
+    /* --- ???? ------------------------------------------------------- */
     bool isTrialActive() const { return m_trialActive; }
     InteractionMode getCurrentMode() const { return m_currentMode; }
     FeedbackDirection getCurrentDirection() const { return m_currentDirection; }
-    bool peekNextTrialSurface(FeedbackDirection& direction, SurfacePolarity& polarity) const;
+    bool peekNextTrialSurface(FeedbackDirection& direction, SurfacePolarity& polarity);
+    bool getReferenceOnLeft() const { return m_currentReferenceOnLeft; }
+    StaircaseState getCurrentStaircaseState() const;
+    int getActiveStaircaseId() const { return m_currentStaircaseId; }
+    int getTargetReversals() const { return m_targetReversals; }
 
-    /* --- 实验控制 ------------------------------------------------------- */
+    /* --- ???? ------------------------------------------------------- */
     void initializeTrials();
     bool hasNextTrial();
     void startNextTrial();
@@ -131,49 +187,72 @@ public:
     void clearExp2BreakFlag() { m_exp2NeedBreak = false; }
     int getExp1CompletedTrials() const;
 
-    /* --- 刚度 ----------------------------------------------------------- */
+    /* --- ?? ----------------------------------------------------------- */
     double getCurrentReferenceStiffness() const;
     double getCurrentComparisonStiffness() const;
 
-    /* --- 数据 ----------------------------------------------------------- */
+    /* --- ?? ----------------------------------------------------------- */
     void saveResults(const std::string& filename);
-    // 新增：获取实验状态
+    // ??:??????
     ExperimentState getExperimentState() const { return m_experimentState; }
     void setExperimentReady() { m_experimentState = ExperimentState::READY; }
 
 
 private:
-    /* --- 实验状态 ------------------------------------------------------- */
+    /* --- ???? ------------------------------------------------------- */
     bool m_trialActive;
-    std::string m_userId;  // 新增：用户ID
+    std::string m_userId;  // ??:??ID
 
-    /* --- 设计参数 ------------------------------------------------------- */
+    /* --- ???? ------------------------------------------------------- */
     InteractionMode m_currentMode;
     FeedbackDirection m_currentDirection;
     int m_currentTrialGroup;    // 0-5
-    int m_currentTrialInGroup;  // 0-109
+    int m_currentTrialInGroup;  // 0-based trial count within the current group
     SurfacePolarity m_currentPolarity;
-    std::vector<int> m_groupProgress; // per-group next trial index
+    std::vector<int> m_groupProgress; // per-group completed trial count (staircase trialCount)
 
-    /* --- 刚度 ----------------------------------------------------------- */
+    /* --- ?? ----------------------------------------------------------- */
     double m_referenceStiffness;
     std::vector<double> m_comparisonStiffnesses;
 
-    /* --- 试次数据 ------------------------------------------------------- */
+    /* --- ???? ------------------------------------------------------- */
     std::vector<TrialResult> m_results;
     TrialResult m_currentTrial;
 
-    /* --- 新增：实验流程配置 --------------------------------------------- */
-    std::vector<GroupConfig> m_experimentSequence; // 6个组的完整配置
+    /* --- ??:?????? --------------------------------------------- */
+    std::vector<GroupConfig> m_experimentSequence; // 6???????
     bool m_sequenceLoaded;
+    std::vector<AdaptiveStaircase> m_staircases;
+    int m_currentStaircaseId;
+    bool m_currentReferenceOnLeft;
+    bool m_pendingReferenceOnLeft;
+    SurfacePolarity m_pendingPolarity;
+    bool m_hasPendingTrialConfig;
+    int m_pendingGroupIdx;
+    double m_startKComp;
+    double m_minKComp;
+    double m_maxKComp;
+    double m_startStep;
+    double m_fineStep;
+    int m_switchAfterReversals;
+    int m_targetReversals;
+    std::mt19937 m_rng;
 
 
-    /* --- 私有工具 ------------------------------------------------------- */
+    /* --- ???? ------------------------------------------------------- */
     void generateComparisonStiffnesses();
     void generateRandomSequence();
     std::vector<TrialConfig> generateRandomizedTrials();
     void saveSequenceToFile(const std::string& filename);
     bool loadSequenceFromFile(const std::string& filename);
+    void initializeStaircases();
+    int findNextExp1GroupWithRemaining(int startGroup) const;
+    int selectStaircaseId(int groupIdx) const;
+    StaircaseState getStaircaseStateForGroup(int groupIdx) const;
+    void setStaircaseStateForGroup(int groupIdx, const StaircaseState& state);
+    void syncGroupProgressFromStaircases();
+    void randomizeNextTrialConfig(int groupIdx, SurfacePolarity& polarityOut, bool& referenceOnLeftOut);
+    bool isGroupIndexComplete(int groupIdx) const;
     std::string getProgressFilename() const { return "user_" + m_userId + "_progress.txt"; }
     std::string getSequenceFilename() const { return "user_" + m_userId + "_sequence.txt"; }
     std::string getExp2SequenceFilename() const { return "user_" + m_userId + "_sequence_exp2.txt"; }

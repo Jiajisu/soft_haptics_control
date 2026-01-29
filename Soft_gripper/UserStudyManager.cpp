@@ -5,6 +5,7 @@
 #include <sstream>
 #include <iomanip>
 #include <map>
+#include <cctype>
 
 namespace {
 int polarityToInt(SurfacePolarity p) {
@@ -62,25 +63,167 @@ std::vector<int> getDefaultExp2GroupSizes() {
     }
     return sizes;
 }
+
+const char* kExp1MethodTag = "STAIRCASE_V2";
+constexpr double kDefaultStartKComp = 160.0;
+constexpr double kDefaultMinKComp = 100.0;
+constexpr double kDefaultMaxKComp = 200.0;
+constexpr double kDefaultStartStep = 10.0;
+constexpr double kDefaultFineStep = 5.0;
+constexpr int kDefaultSwitchAfterReversals = 2;
+constexpr int kDefaultTargetReversals = 10;
+}
+
+AdaptiveStaircase::AdaptiveStaircase(
+    double kRef,
+    double startKComp,
+    double minKComp,
+    double maxKComp,
+    double startStep,
+    double fineStep,
+    int switchAfterReversals,
+    int targetReversals)
+    : m_kRef(kRef)
+    , m_minKComp(minKComp)
+    , m_maxKComp(maxKComp)
+    , m_startStep(startStep)
+    , m_fineStep(fineStep)
+    , m_switchAfterReversals(switchAfterReversals)
+    , m_targetReversals(targetReversals)
+{
+    m_state.currentKComp = clampK(startKComp);
+    m_state.currentStep = startStep;
+    m_state.reversalCount = 0;
+    m_state.trialCount = 0;
+    m_state.correctStreak = 0;
+    m_state.lastMoveDir = 0;
+    refreshStep();
+}
+
+double AdaptiveStaircase::clampK(double k) const
+{
+    if (k < m_minKComp) return m_minKComp;
+    if (k > m_maxKComp) return m_maxKComp;
+    return k;
+}
+
+void AdaptiveStaircase::refreshStep()
+{
+    m_state.currentStep = (m_state.reversalCount >= m_switchAfterReversals) ? m_fineStep : m_startStep;
+}
+
+double AdaptiveStaircase::getNextKComp() const
+{
+    return m_state.currentKComp;
+}
+
+double AdaptiveStaircase::getDeltaK() const
+{
+    return m_state.currentKComp - m_kRef;
+}
+
+double AdaptiveStaircase::getStepSize() const
+{
+    return (m_state.reversalCount >= m_switchAfterReversals) ? m_fineStep : m_startStep;
+}
+
+void AdaptiveStaircase::setState(const StaircaseState& state)
+{
+    m_state = state;
+    if (m_state.trialCount < 0) m_state.trialCount = 0;
+    if (m_state.reversalCount < 0) m_state.reversalCount = 0;
+    m_state.currentKComp = clampK(m_state.currentKComp);
+    refreshStep();
+}
+
+void AdaptiveStaircase::update(bool isCorrect)
+{
+    refreshStep();
+    const double step = m_state.currentStep;
+    const double prevK = m_state.currentKComp;
+    int moveDir = 0;
+
+    if (!isCorrect) {
+        m_state.correctStreak = 0;
+        double nextK = clampK(prevK + step);
+        if (nextK != prevK) {
+            moveDir = 1;
+        }
+        m_state.currentKComp = nextK;
+    }
+    else {
+        m_state.correctStreak++;
+        if (m_state.correctStreak >= 2) {
+            double nextK = clampK(prevK - step);
+            if (nextK != prevK) {
+                moveDir = -1;
+            }
+            m_state.currentKComp = nextK;
+            m_state.correctStreak = 0;
+        }
+    }
+
+    if (moveDir != 0) {
+        if (m_state.lastMoveDir != 0 && m_state.lastMoveDir != moveDir) {
+            ++m_state.reversalCount;
+        }
+        m_state.lastMoveDir = moveDir;
+    }
+
+    ++m_state.trialCount;
+    refreshStep();
+}
+
+bool AdaptiveStaircase::shouldStop() const
+{
+    return m_state.reversalCount >= m_targetReversals;
 }
 
 UserStudyManager::UserStudyManager()
     : m_trialActive(false)
+    , m_userId("")
     , m_currentMode(InteractionMode::FORCE_TO_POSITION)
     , m_currentDirection(FeedbackDirection::LATERAL_X)
     , m_currentTrialGroup(0)
     , m_currentTrialInGroup(0)
-    , m_referenceStiffness(100.0)
-    , m_sequenceLoaded(false)
-    , m_experimentState(ExperimentState::NOT_STARTED)
-    , m_csvFileReady(false)
     , m_currentPolarity(SurfacePolarity::POSITIVE)
+    , m_groupProgress()
+    , m_referenceStiffness(100.0)
+    , m_comparisonStiffnesses()
+    , m_results()
+    , m_currentTrial()
+    , m_experimentSequence()
+    , m_sequenceLoaded(false)
+    , m_staircases()
+    , m_currentStaircaseId(0)
+    , m_currentReferenceOnLeft(true)
+    , m_pendingReferenceOnLeft(true)
+    , m_pendingPolarity(SurfacePolarity::POSITIVE)
+    , m_hasPendingTrialConfig(false)
+    , m_pendingGroupIdx(-1)
+    , m_startKComp(kDefaultStartKComp)
+    , m_minKComp(kDefaultMinKComp)
+    , m_maxKComp(kDefaultMaxKComp)
+    , m_startStep(kDefaultStartStep)
+    , m_fineStep(kDefaultFineStep)
+    , m_switchAfterReversals(kDefaultSwitchAfterReversals)
+    , m_targetReversals(kDefaultTargetReversals)
+    , m_rng(std::random_device{}())
+    , m_csvFileReady(false)
+    , m_exp2CsvFileReady(false)
+    , m_experimentState(ExperimentState::NOT_STARTED)
     , m_exp2State(ExperimentState::NOT_STARTED)
+    , m_exp2Sequence()
     , m_exp2SequenceLoaded(false)
+    , m_exp2GroupSizes()
     , m_exp2CurrentTrialIndex(0)
     , m_exp2CurrentGroup(0)
     , m_exp2TrialActive(false)
     , m_exp2NeedBreak(false)
+    , m_exp2GroupProgress()
+    , m_exp2CurrentTrial()
+    , m_exp2Results()
+    , m_exp2TrialStart()
 {
     generateComparisonStiffnesses();
     m_exp2GroupSizes = getDefaultExp2GroupSizes();
@@ -118,6 +261,9 @@ bool UserStudyManager::loadOrCreateUserSession(const std::string& userId)
         generateRandomSequence();
         saveSequenceToFile(getSequenceFilename());
     }
+    generateComparisonStiffnesses();
+    initializeStaircases();
+
     bool seq2Loaded = loadExp2Sequence(getExp2SequenceFilename());
     if (!seq2Loaded) {
         std::cout << "[UserStudy] No Experiment 2 sequence found. Generating new." << std::endl;
@@ -136,11 +282,14 @@ bool UserStudyManager::loadOrCreateUserSession(const std::string& userId)
     }
     ensureExp1GroupProgressSize();
     ensureExp2GroupProgressSize();
+    syncGroupProgressFromStaircases();
 
     if (loadProgress(getProgressFilename())) {
+        StaircaseState st = getStaircaseStateForGroup(m_currentTrialGroup);
         std::cout << "[UserStudy] Progress loaded: Exp1 Group "
             << (m_currentTrialGroup + 1) << "/6 Trial "
-            << (m_currentTrialInGroup + 1) << "/110" << std::endl;
+            << (m_currentTrialInGroup + 1)
+            << " (reversals " << st.reversalCount << "/" << m_targetReversals << ")" << std::endl;
     }
     else {
         std::cout << "[UserStudy] No progress file found. Starting fresh." << std::endl;
@@ -150,18 +299,27 @@ bool UserStudyManager::loadOrCreateUserSession(const std::string& userId)
         m_exp2CurrentTrialIndex = 0;
         m_exp2CurrentGroup = 0;
         m_exp2State = ExperimentState::READY;
+        syncGroupProgressFromStaircases();
         saveProgress();
     }
 
-    if (m_currentTrialGroup >= 6) {
+    int nextExp1Group = findNextExp1GroupWithRemaining(m_currentTrialGroup);
+    if (nextExp1Group < 0) {
         m_experimentState = ExperimentState::EXPERIMENT_COMPLETE;
     }
-    else if (m_currentTrialInGroup >= 110) {
-        m_experimentState = ExperimentState::GROUP_COMPLETE;
+    else {
+        m_currentTrialGroup = nextExp1Group;
+        if (m_currentTrialGroup < static_cast<int>(m_groupProgress.size())) {
+            m_currentTrialInGroup = m_groupProgress[m_currentTrialGroup];
+        }
+        m_currentMode = m_experimentSequence[m_currentTrialGroup].mode;
+        m_currentDirection = m_experimentSequence[m_currentTrialGroup].direction;
+        if (m_experimentState != ExperimentState::IN_PROGRESS) {
+            m_experimentState = ExperimentState::READY;
+        }
     }
-    else if (m_experimentState != ExperimentState::IN_PROGRESS) {
-        m_experimentState = ExperimentState::READY;
-    }
+    sanitizeProgressIndices();
+    m_trialActive = false;
 
     if (m_exp2CurrentTrialIndex >= static_cast<int>(m_exp2Sequence.size())) {
         m_exp2State = ExperimentState::EXPERIMENT_COMPLETE;
@@ -208,7 +366,7 @@ void UserStudyManager::generateRandomSequence()
         GroupConfig group;
         group.mode = config.first;
         group.direction = config.second;
-        group.trials = generateRandomizedTrials();
+        group.trials.clear();
         m_experimentSequence.push_back(group);
     }
 
@@ -284,41 +442,20 @@ void UserStudyManager::saveSequenceToFile(const std::string& filename)
         return;
     }
 
-    // ?????
     file << "# Experiment Sequence for User: " << m_userId << "\n";
-    file << "# Format: GroupIndex Mode Direction\n";
+    file << "Exp1Method " << kExp1MethodTag << "\n";
+    file << "Exp1StaircaseParams "
+        << "kRef=" << m_referenceStiffness << " "
+        << "startKComp=" << m_startKComp << " "
+        << "minKComp=" << m_minKComp << " "
+        << "maxKComp=" << m_maxKComp << " "
+        << "step" << m_startStep << "_to" << m_fineStep << "_atRev=" << m_switchAfterReversals << " "
+        << "targetRev=" << m_targetReversals << "\n";
+    file << "# GroupIndex Mode Direction\n";
 
     for (size_t i = 0; i < m_experimentSequence.size(); ++i) {
         const auto& group = m_experimentSequence[i];
-        file << i << " " << (int)group.mode << " " << (int)group.direction << "\n";
-    }
-
-    file << "\n# Trial Sequence (StiffnessIndex Repetition Polarity)\n";
-
-    // ??????????
-    for (size_t groupIdx = 0; groupIdx < m_experimentSequence.size(); ++groupIdx) {
-        file << "# Group " << groupIdx << " (110 trials)\n";
-        const auto& trials = m_experimentSequence[groupIdx].trials;
-
-        // ?????110???
-        for (size_t i = 0; i < trials.size(); ++i) {
-            file << trials[i].stiffnessIndex << " "
-                << trials[i].repetition << " "
-                << polarityToInt(trials[i].polarity);
-
-            // ??10???,????
-            if ((i + 1) % 10 == 0) {
-                file << "\n";
-            }
-            else if (i < trials.size() - 1) {
-                file << " ";
-            }
-        }
-
-        // ????????
-        if (groupIdx < m_experimentSequence.size() - 1) {
-            file << "\n\n";
-        }
+        file << "Group " << i << " " << static_cast<int>(group.mode) << " " << static_cast<int>(group.direction) << "\n";
     }
 
     file.close();
@@ -352,117 +489,202 @@ bool UserStudyManager::loadSequenceFromFile(const std::string& filename)
 
     m_experimentSequence.clear();
     std::string line;
-    bool readingGroups = true;
-    int currentGroupIdx = -1;
-
-    std::cout << "[UserStudy] Loading sequence from: " << filename << std::endl;
+    bool methodOk = false;
 
     while (std::getline(file, line)) {
-        // ???????
         if (line.empty() || line[0] == '#') {
-            // ????????????
-            if (line.find("Trial Sequence") != std::string::npos) {
-                readingGroups = false;
-                std::cout << "[UserStudy] Starting to read trial sequences..." << std::endl;
-            }
             continue;
         }
 
         std::istringstream iss(line);
+        std::string key;
+        iss >> key;
 
-        if (readingGroups && m_experimentSequence.size() < 6) {
-            // ?????
-            int groupIdx, mode, dir;
-            if (iss >> groupIdx >> mode >> dir) {
+        if (key == "Exp1Method") {
+            std::string method;
+            iss >> method;
+            if (method == kExp1MethodTag) {
+                methodOk = true;
+            }
+            else {
+                std::cout << "[UserStudy] Unsupported Exp1Method in sequence: " << method << std::endl;
+                return false;
+            }
+        }
+        else if (key == "Exp1StaircaseParams") {
+            std::string token;
+            while (iss >> token) {
+                auto pos = token.find('=');
+                if (pos == std::string::npos) continue;
+                std::string name = token.substr(0, pos);
+                std::string value = token.substr(pos + 1);
+                try {
+                    if (name == "kRef") {
+                        m_referenceStiffness = std::stod(value);
+                    }
+                    else if (name == "startKComp") {
+                        m_startKComp = std::stod(value);
+                    }
+                    else if (name == "minKComp") {
+                        m_minKComp = std::stod(value);
+                    }
+                    else if (name == "maxKComp") {
+                        m_maxKComp = std::stod(value);
+                    }
+                    else if (name.rfind("step", 0) == 0) {
+                        m_switchAfterReversals = std::stoi(value);
+                        auto toPos = name.find("_to");
+                        auto atPos = name.find("_atRev");
+                        if (toPos != std::string::npos) {
+                            std::string startStr = name.substr(4, toPos - 4);
+                            double startVal = std::stod(startStr);
+                            if (atPos != std::string::npos && atPos > toPos + 3) {
+                                std::string fineStr = name.substr(toPos + 3, atPos - (toPos + 3));
+                                double fineVal = std::stod(fineStr);
+                                m_startStep = startVal;
+                                m_fineStep = fineVal;
+                            }
+                            else {
+                                m_startStep = startVal;
+                            }
+                        }
+                    }
+                    else if (name == "targetRev") {
+                        m_targetReversals = std::stoi(value);
+                    }
+                }
+                catch (const std::exception&) {
+                    std::cout << "[UserStudy] Warning: could not parse staircase param token '" << token << "'" << std::endl;
+                }
+            }
+        }
+        else if (key == "Group") {
+            int idx = 0;
+            int mode = 0;
+            int dir = 0;
+            if (iss >> idx >> mode >> dir) {
                 GroupConfig group;
                 group.mode = static_cast<InteractionMode>(mode);
                 group.direction = static_cast<FeedbackDirection>(dir);
-                group.trials.clear(); // ??trials?????
+                group.trials.clear();
                 m_experimentSequence.push_back(group);
-
-                std::cout << "[UserStudy] Loaded group " << groupIdx
-                    << " Mode:" << mode << " Dir:" << dir << std::endl;
-            }
-        }
-        else if (!readingGroups) {
-            // ??????????????
-            if (currentGroupIdx < 0 || currentGroupIdx >= m_experimentSequence.size()) {
-                // ???????????
-                for (size_t i = 0; i < m_experimentSequence.size(); ++i) {
-                    if (m_experimentSequence[i].trials.size() < 110) {
-                        currentGroupIdx = i;
-                        break;
-                    }
-                }
-            }
-
-            if (currentGroupIdx >= 0 && currentGroupIdx < m_experimentSequence.size()) {
-                std::vector<int> tokens;
-                int value;
-                while (iss >> value) {
-                    tokens.push_back(value);
-                }
-
-                size_t stride = 0;
-                if (!tokens.empty()) {
-                    stride = (tokens.size() % 3 == 0) ? 3 : 2;
-                }
-
-                for (size_t idx = 0; stride != 0 && idx + stride <= tokens.size(); idx += stride) {
-                    int stiffIdx = tokens[idx];
-                    int rep = tokens[idx + 1];
-                    SurfacePolarity pol = SurfacePolarity::POSITIVE;
-                    if (stride == 3) {
-                        pol = polarityFromInt(tokens[idx + 2]);
-                    }
-                    if (m_experimentSequence[currentGroupIdx].trials.size() < 110) {
-                        m_experimentSequence[currentGroupIdx].trials.push_back({ stiffIdx, rep, pol });
-                    }
-                }
-
-                // ???????,?????
-                if (m_experimentSequence[currentGroupIdx].trials.size() >= 110) {
-                    std::cout << "[UserStudy] Group " << currentGroupIdx
-                        << " loaded with " << m_experimentSequence[currentGroupIdx].trials.size()
-                        << " trials" << std::endl;
-                    currentGroupIdx++;
-                }
             }
         }
     }
 
     file.close();
 
-    // ???????
-    std::cout << "[UserStudy] Sequence loading complete. Validating..." << std::endl;
-    std::cout << "[UserStudy] Total groups loaded: " << m_experimentSequence.size() << std::endl;
-
-    bool valid = true;
-    if (m_experimentSequence.size() != 6) {
-        std::cerr << "[UserStudy] ERROR: Expected 6 groups, got "
-            << m_experimentSequence.size() << std::endl;
-        valid = false;
+    if (!methodOk) {
+        std::cerr << "[UserStudy] Sequence file missing Exp1Method tag or not STAIRCASE_V2." << std::endl;
+        return false;
     }
+
+    if (m_experimentSequence.size() != 6) {
+        std::cerr << "[UserStudy] ERROR: Expected 6 groups, got " << m_experimentSequence.size() << std::endl;
+        m_experimentSequence.clear();
+        return false;
+    }
+
+    m_sequenceLoaded = true;
+    return true;
+}
+
+void UserStudyManager::initializeStaircases()
+{
+    m_staircases.clear();
+    if (m_experimentSequence.empty()) return;
+    double minK = std::max(m_minKComp, m_referenceStiffness);
+    double maxK = std::max(minK, m_maxKComp);
+    double startK = std::min(std::max(m_startKComp, minK), maxK);
 
     for (size_t i = 0; i < m_experimentSequence.size(); ++i) {
-        size_t trialCount = m_experimentSequence[i].trials.size();
-        std::cout << "[UserStudy] Group " << i << " has " << trialCount << " trials" << std::endl;
+        m_staircases.emplace_back(
+            m_referenceStiffness,
+            startK,
+            minK,
+            maxK,
+            m_startStep,
+            m_fineStep,
+            m_switchAfterReversals,
+            m_targetReversals);
+    }
+    syncGroupProgressFromStaircases();
+    m_hasPendingTrialConfig = false;
+    m_pendingGroupIdx = -1;
+}
 
-        if (trialCount != 110) {
-            std::cerr << "[UserStudy] ERROR: Group " << i
-                << " should have 110 trials, has " << trialCount << std::endl;
-            valid = false;
+int UserStudyManager::selectStaircaseId(int /*groupIdx*/) const
+{
+    return 0;
+}
+
+StaircaseState UserStudyManager::getStaircaseStateForGroup(int groupIdx) const
+{
+    if (groupIdx >= 0 && groupIdx < static_cast<int>(m_staircases.size())) {
+        return m_staircases[groupIdx].getState();
+    }
+    return StaircaseState{};
+}
+
+void UserStudyManager::setStaircaseStateForGroup(int groupIdx, const StaircaseState& state)
+{
+    if (groupIdx >= 0 && groupIdx < static_cast<int>(m_staircases.size())) {
+        m_staircases[groupIdx].setState(state);
+    }
+}
+
+void UserStudyManager::syncGroupProgressFromStaircases()
+{
+    size_t groupCount = m_experimentSequence.size();
+    if (m_groupProgress.size() < groupCount) {
+        m_groupProgress.resize(groupCount, 0);
+    }
+    for (size_t i = 0; i < groupCount; ++i) {
+        if (i < m_staircases.size()) {
+            m_groupProgress[i] = m_staircases[i].getState().trialCount;
         }
     }
+}
 
-    m_sequenceLoaded = valid;
+void UserStudyManager::randomizeNextTrialConfig(int groupIdx, SurfacePolarity& polarityOut, bool& referenceOnLeftOut)
+{
+    std::uniform_int_distribution<int> coin(0, 1);
+    referenceOnLeftOut = (coin(m_rng) == 1);
+    polarityOut = (coin(m_rng) == 1) ? SurfacePolarity::POSITIVE : SurfacePolarity::NEGATIVE;
+    m_pendingGroupIdx = groupIdx;
+    m_pendingReferenceOnLeft = referenceOnLeftOut;
+    m_pendingPolarity = polarityOut;
+    m_hasPendingTrialConfig = true;
+}
 
-    if (!valid) {
-        std::cerr << "[UserStudy] Sequence validation failed! Clearing data." << std::endl;
-        m_experimentSequence.clear();
+int UserStudyManager::findNextExp1GroupWithRemaining(int startGroup) const
+{
+    int groupCount = static_cast<int>(m_experimentSequence.size());
+    if (groupCount <= 0 || m_staircases.size() < m_experimentSequence.size()) {
+        return -1;
     }
+    if (startGroup < 0) startGroup = 0;
+    for (int offset = 0; offset < groupCount; ++offset) {
+        int idx = (startGroup + offset) % groupCount;
+        if (idx < 0 || idx >= groupCount) continue;
+        if (!m_staircases[idx].shouldStop()) {
+            return idx;
+        }
+    }
+    return -1;
+}
 
-    return m_sequenceLoaded;
+bool UserStudyManager::isGroupIndexComplete(int groupIdx) const
+{
+    if (groupIdx < 0 || groupIdx >= static_cast<int>(m_staircases.size())) {
+        return false;
+    }
+    return m_staircases[groupIdx].shouldStop();
+}
+
+StaircaseState UserStudyManager::getCurrentStaircaseState() const
+{
+    return getStaircaseStateForGroup(m_currentTrialGroup);
 }
 
 bool UserStudyManager::loadExp2Sequence(const std::string& filename)
@@ -736,22 +958,30 @@ void UserStudyManager::saveProgress()
 
     ensureExp1GroupProgressSize();
     ensureExp2GroupProgressSize();
+    syncGroupProgressFromStaircases();
 
-    int exp1TotalDone = getExp1CompletedTrials();
-    int exp2TotalDone = getExp2CompletedTrials();
-
-    file << "Exp1CurrentTrial " << (m_currentTrialGroup * 110 + m_currentTrialInGroup) << "\n";
+    file << "Exp1Method " << kExp1MethodTag << "\n";
     file << "Exp1CurrentGroup " << m_currentTrialGroup << "\n";
+    file << "Exp1CurrentTrialInGroup " << m_currentTrialInGroup << "\n";
     file << "Exp1State " << static_cast<int>(m_experimentState) << "\n";
-    file << "Exp1TotalTrialsCompleted " << exp1TotalDone << "\n";
     file << "Exp1GroupProgress";
     for (int v : m_groupProgress) file << " " << v;
     file << "\n";
+    file << "Exp1StaircaseState\n";
+    for (size_t i = 0; i < m_staircases.size(); ++i) {
+        const auto state = m_staircases[i].getState();
+        file << "g" << i << " "
+            << state.currentKComp << " "
+            << state.currentStep << " "
+            << state.reversalCount << " "
+            << state.trialCount << " "
+            << state.correctStreak << " "
+            << state.lastMoveDir << "\n";
+    }
 
     file << "Exp2CurrentTrial " << m_exp2CurrentTrialIndex << "\n";
     file << "Exp2CurrentGroup " << m_exp2CurrentGroup << "\n";
     file << "Exp2State " << static_cast<int>(m_exp2State) << "\n";
-    file << "Exp2TotalTrialsCompleted " << exp2TotalDone << "\n";
     file << "Exp2GroupProgress";
     for (int v : m_exp2GroupProgress) file << " " << v;
     file << "\n";
@@ -766,7 +996,11 @@ bool UserStudyManager::loadProgress(const std::string& filename)
     std::ifstream file(filename);
     if (!file) return false;
 
-    // defaults in case keys missing (backward compatibility)
+    if (m_staircases.size() < m_experimentSequence.size()) {
+        initializeStaircases();
+    }
+
+    // defaults
     m_exp2CurrentTrialIndex = 0;
     m_exp2State = ExperimentState::READY;
     m_exp2NeedBreak = false;
@@ -776,8 +1010,14 @@ bool UserStudyManager::loadProgress(const std::string& filename)
     m_currentTrialGroup = 0;
     m_currentTrialInGroup = 0;
     m_experimentState = ExperimentState::READY;
-    int exp1CurrentTrialFlat = -1;
+    m_trialActive = false;
     int exp2CurrentTrialFlat = -1;
+    bool exp1MethodOk = false;
+
+    std::vector<StaircaseState> loadedStates(m_staircases.size());
+    for (size_t i = 0; i < loadedStates.size(); ++i) {
+        loadedStates[i] = m_staircases[i].getState();
+    }
 
     std::string line;
     while (std::getline(file, line)) {
@@ -786,12 +1026,18 @@ bool UserStudyManager::loadProgress(const std::string& filename)
         std::istringstream iss(line);
         std::string key;
         if (iss >> key) {
-            // New-format keys
-            if (key == "Exp1CurrentTrial") {
-                iss >> exp1CurrentTrialFlat;
+            if (key == "Exp1Method") {
+                std::string method;
+                iss >> method;
+                if (method == kExp1MethodTag) {
+                    exp1MethodOk = true;
+                }
             }
             else if (key == "Exp1CurrentGroup") {
                 iss >> m_currentTrialGroup;
+            }
+            else if (key == "Exp1CurrentTrialInGroup") {
+                iss >> m_currentTrialInGroup;
             }
             else if (key == "Exp1State") {
                 int stateInt = 0;
@@ -799,13 +1045,22 @@ bool UserStudyManager::loadProgress(const std::string& filename)
                 if (stateInt < 0 || stateInt > static_cast<int>(ExperimentState::EXPERIMENT_COMPLETE)) stateInt = 0;
                 m_experimentState = static_cast<ExperimentState>(stateInt);
             }
-            else if (key == "Exp1TotalTrialsCompleted") {
-                int tmp; iss >> tmp;
-            }
             else if (key == "Exp1GroupProgress") {
                 int v;
                 while (iss >> v) {
                     m_groupProgress.push_back(v);
+                }
+            }
+            else if (key == "Exp1StaircaseState") {
+                // header line; actual states parsed below
+            }
+            else if (!key.empty() && key[0] == 'g' && key.size() > 1 && std::isdigit(static_cast<unsigned char>(key[1]))) {
+                int idx = std::stoi(key.substr(1));
+                StaircaseState state = {};
+                iss >> state.currentKComp >> state.currentStep >> state.reversalCount
+                    >> state.trialCount >> state.correctStreak >> state.lastMoveDir;
+                if (idx >= 0 && idx < static_cast<int>(loadedStates.size())) {
+                    loadedStates[idx] = state;
                 }
             }
             else if (key == "Exp2CurrentTrial") {
@@ -828,43 +1083,26 @@ bool UserStudyManager::loadProgress(const std::string& filename)
                     m_exp2GroupProgress.push_back(v);
                 }
             }
-            else if (key == "Exp2TotalTrialsCompleted") {
-                int tmp; iss >> tmp;
-            }
-            // Legacy keys (backward compatibility)
-            else if (key == "CurrentGroup") {
-                iss >> m_currentTrialGroup;
-            }
-            else if (key == "CurrentTrialInGroup") {
-                iss >> m_currentTrialInGroup;
-            }
-            else if (key == "TotalTrialsCompleted") {
-                int tmp; iss >> tmp;
-            }
-            else if (key == "Exp2CurrentTrialLegacy") {
-                // no-op placeholder
-            }
         }
     }
 
     file.close();
-    ensureExp1GroupProgressSize();
-    ensureExp2GroupProgressSize();
-
-    // Derive Exp1 indices
-    if (exp1CurrentTrialFlat >= 0) {
-        m_currentTrialGroup = exp1CurrentTrialFlat / 110;
-        m_currentTrialInGroup = exp1CurrentTrialFlat % 110;
+    if (!exp1MethodOk) {
+        std::cout << "[UserStudy] Progress file missing Exp1Method or incompatible version." << std::endl;
+        return false;
     }
-    // Backward compatibility: if group progress missing, seed from current indices
+
     if (m_groupProgress.empty() && !m_experimentSequence.empty()) {
         m_groupProgress.resize(m_experimentSequence.size(), 0);
     }
+    ensureExp1GroupProgressSize();
+    for (size_t i = 0; i < loadedStates.size(); ++i) {
+        setStaircaseStateForGroup(static_cast<int>(i), loadedStates[i]);
+    }
+    syncGroupProgressFromStaircases();
+
     if (m_currentTrialGroup >= 0 && m_currentTrialGroup < static_cast<int>(m_groupProgress.size())) {
-        if (m_groupProgress[m_currentTrialGroup] < m_currentTrialInGroup) {
-            m_groupProgress[m_currentTrialGroup] = m_currentTrialInGroup;
-        }
-        else {
+        if (m_currentTrialInGroup > m_groupProgress[m_currentTrialGroup]) {
             m_currentTrialInGroup = m_groupProgress[m_currentTrialGroup];
         }
     }
@@ -888,6 +1126,7 @@ bool UserStudyManager::loadProgress(const std::string& filename)
             }
         }
     }
+    ensureExp2GroupProgressSize();
     if (m_exp2CurrentGroup < 0 || m_exp2CurrentGroup >= exp2GroupCount) {
         m_exp2CurrentGroup = getExp2GroupIndexForTrial(m_exp2CurrentTrialIndex);
         if (m_exp2CurrentGroup < 0 || m_exp2CurrentGroup >= exp2GroupCount) {
@@ -903,6 +1142,7 @@ bool UserStudyManager::loadProgress(const std::string& filename)
             m_exp2CurrentTrialIndex = computedIndex;
         }
     }
+    m_currentStaircaseId = selectStaircaseId(m_currentTrialGroup);
     sanitizeProgressIndices();
     return true;
 }
@@ -910,7 +1150,6 @@ bool UserStudyManager::loadProgress(const std::string& filename)
 // ?? startNextTrial ??
 void UserStudyManager::startNextTrial()
 {
-    // ??????
     if (m_experimentState == ExperimentState::EXPERIMENT_COMPLETE) {
         std::cout << "[UserStudy] Experiment already complete!" << std::endl;
         return;
@@ -921,95 +1160,66 @@ void UserStudyManager::startNextTrial()
         return;
     }
 
-    if (!m_sequenceLoaded) {
-        std::cout << "[UserStudy] No sequence loaded!" << std::endl;
-        return;
-    }
-
-    if (m_experimentSequence.empty()) {
-        std::cout << "[UserStudy] ERROR: Experiment sequence is empty!" << std::endl;
+    if (!m_sequenceLoaded || m_experimentSequence.empty() || m_staircases.size() < m_experimentSequence.size()) {
+        std::cout << "[UserStudy] No sequence or staircase loaded!" << std::endl;
         return;
     }
 
     sanitizeProgressIndices();
-    ensureExp1GroupProgressSize();
-    if (m_currentTrialGroup >= 0 && m_currentTrialGroup < static_cast<int>(m_groupProgress.size())) {
-        m_currentTrialInGroup = m_groupProgress[m_currentTrialGroup];
-    }
+    syncGroupProgressFromStaircases();
 
-    // ????
-    if (m_currentTrialGroup >= m_experimentSequence.size()) {
-        std::cout << "[UserStudy] ERROR: Invalid group index " << m_currentTrialGroup
-            << " (max: " << m_experimentSequence.size() - 1 << ")" << std::endl;
+    int targetGroup = findNextExp1GroupWithRemaining(m_currentTrialGroup);
+    if (targetGroup < 0) {
         m_experimentState = ExperimentState::EXPERIMENT_COMPLETE;
+        std::cout << "[UserStudy] Experiment Complete! Thank you for your participation." << std::endl;
+        saveResults("user_" + m_userId + "_final_results.csv");
         return;
     }
 
-    // ???????????
-    if (m_currentTrialInGroup >= 110) {
-        if (m_currentTrialGroup >= 0 && m_currentTrialGroup < static_cast<int>(m_groupProgress.size())) {
-            m_groupProgress[m_currentTrialGroup] = 110;
-        }
-        m_currentTrialGroup++;
-        if (m_currentTrialGroup >= 6) {
-            m_experimentState = ExperimentState::EXPERIMENT_COMPLETE;
-            std::cout << "[UserStudy] Experiment Complete! Thank you for your participation." << std::endl;
-            saveResults("user_" + m_userId + "_final_results.csv");
-            return;
-        }
-        ensureExp1GroupProgressSize();
-        if (m_currentTrialGroup < static_cast<int>(m_groupProgress.size())) {
-            m_currentTrialInGroup = m_groupProgress[m_currentTrialGroup];
-        }
-        else {
-            m_currentTrialInGroup = 0;
-        }
+    m_currentTrialGroup = targetGroup;
+    m_currentMode = m_experimentSequence[m_currentTrialGroup].mode;
+    m_currentDirection = m_experimentSequence[m_currentTrialGroup].direction;
+    m_currentStaircaseId = selectStaircaseId(m_currentTrialGroup);
+
+    AdaptiveStaircase& staircase = m_staircases[m_currentTrialGroup];
+    StaircaseState stairState = staircase.getState();
+    m_currentTrialInGroup = stairState.trialCount;
+
+    if (!m_hasPendingTrialConfig || m_pendingGroupIdx != m_currentTrialGroup) {
+        randomizeNextTrialConfig(m_currentTrialGroup, m_pendingPolarity, m_pendingReferenceOnLeft);
     }
+    m_currentReferenceOnLeft = m_pendingReferenceOnLeft;
+    m_currentPolarity = m_pendingPolarity;
+    m_hasPendingTrialConfig = false;
+    m_pendingGroupIdx = -1;
 
-    // ???????
-    if (m_currentTrialGroup >= m_experimentSequence.size()) {
-        std::cout << "[UserStudy] ERROR: Group index out of bounds!" << std::endl;
-        return;
-    }
+    double comparisonK = staircase.getNextKComp();
 
-    // ???????
-    const auto& currentGroup = m_experimentSequence[m_currentTrialGroup];
-
-    // ??????
-    if (m_currentTrialInGroup >= currentGroup.trials.size()) {
-        std::cout << "[UserStudy] ERROR: Trial index " << m_currentTrialInGroup
-            << " out of bounds (max: " << currentGroup.trials.size() - 1 << ")" << std::endl;
-        return;
-    }
-
-    m_currentMode = currentGroup.mode;
-    m_currentDirection = currentGroup.direction;
-
-    // ????????
-    const auto& trialConfig = currentGroup.trials[m_currentTrialInGroup];
-
-    // ??????
-    if (trialConfig.stiffnessIndex >= m_comparisonStiffnesses.size()) {
-        std::cout << "[UserStudy] ERROR: Stiffness index " << trialConfig.stiffnessIndex
-            << " out of bounds (max: " << m_comparisonStiffnesses.size() - 1 << ")" << std::endl;
-        return;
-    }
-
-    // ?????
     m_currentTrial = TrialResult{};
-    m_currentTrial.trialNumber = m_currentTrialGroup * 110 + m_currentTrialInGroup;
+    m_currentTrial.trialNumber = getExp1CompletedTrials();
+    m_currentTrial.groupIndex = m_currentTrialGroup;
+    m_currentTrial.trialInGroup = m_currentTrialInGroup;
     m_currentTrial.referenceStiffness = m_referenceStiffness;
-    m_currentTrial.comparisonStiffness = m_comparisonStiffnesses[trialConfig.stiffnessIndex];
-    m_currentPolarity = trialConfig.polarity;
+    m_currentTrial.comparisonStiffness = comparisonK;
+    m_currentTrial.userChoice = -1;
+    m_currentTrial.correctChoice = m_currentReferenceOnLeft ? 1 : 0;
+    m_currentTrial.isCorrect = false;
+    m_currentTrial.reactionTime = 0.0;
     m_currentTrial.polarity = m_currentPolarity;
-    // ? ??:???T????????????
+    m_currentTrial.referenceOnLeft = m_currentReferenceOnLeft;
+    m_currentTrial.staircaseDeltaK = comparisonK - m_referenceStiffness;
+    m_currentTrial.staircaseStep = staircase.getStepSize();
+    m_currentTrial.staircaseReversals = stairState.reversalCount;
+    m_currentTrial.staircaseTrialInGroup = stairState.trialCount + 1;
+    m_currentTrial.staircaseId = m_currentStaircaseId;
     m_currentTrial.trialStartTime = std::chrono::steady_clock::now();
+
     m_trialActive = true;
     m_experimentState = ExperimentState::IN_PROGRESS;
 
     std::cout << "\n[UserStudy] === NEW TRIAL ===" << std::endl;
-    std::cout << "Trial " << (m_currentTrialInGroup + 1) << "/110"
-        << " | Group " << (m_currentTrialGroup + 1) << "/6"
+    std::cout << "Group " << (m_currentTrialGroup + 1) << "/6"
+        << " | Trial " << (m_currentTrialInGroup + 1)
         << " | Mode: " << ((int)m_currentMode == 0 ? "F-P" : "F-F")
         << " | Direction: ";
 
@@ -1020,45 +1230,36 @@ void UserStudyManager::startNextTrial()
     }
 
     std::cout << " | Polarity: "
-        << ((m_currentPolarity == SurfacePolarity::POSITIVE) ? "+ (Red)" : "- (Blue)");
+        << ((m_currentPolarity == SurfacePolarity::POSITIVE) ? "+ (Red)" : "- (Blue)") << std::endl;
 
-    std::cout << "\nRef: " << m_currentTrial.referenceStiffness
+    std::cout << "RefOnLeft: " << (m_currentReferenceOnLeft ? "Yes" : "No")
+        << " | Ref: " << m_currentTrial.referenceStiffness
         << " | Comp: " << m_currentTrial.comparisonStiffness
-        << " (Ratio: " << std::fixed << std::setprecision(1)
-        << (trialConfig.stiffnessIndex * 0.1 + 0.5) << ")"
-        << std::endl;
+        << " | DeltaK: " << std::fixed << std::setprecision(2) << m_currentTrial.staircaseDeltaK
+        << " | Step: " << m_currentTrial.staircaseStep
+        << " | Reversals: " << stairState.reversalCount << "/" << m_targetReversals
+        << " | CorrectAnswer: " << (m_currentTrial.correctChoice == 0 ? 1 : 2)
+        << " (1=Left, 2=Right)" << std::endl;
 }
 
-bool UserStudyManager::peekNextTrialSurface(FeedbackDirection& direction, SurfacePolarity& polarity) const
+bool UserStudyManager::peekNextTrialSurface(FeedbackDirection& direction, SurfacePolarity& polarity)
 {
-	if (!m_sequenceLoaded || m_experimentSequence.empty()) {
-		return false;
-	}
+    if (!hasNextTrial()) {
+        return false;
+    }
 
-	int groupIndex = m_currentTrialGroup;
-	int trialIndex = m_currentTrialInGroup;
+    int targetGroup = findNextExp1GroupWithRemaining(m_currentTrialGroup);
+    if (targetGroup < 0 || targetGroup >= static_cast<int>(m_experimentSequence.size())) {
+        return false;
+    }
 
-	if (trialIndex >= 110) {
-		trialIndex = 0;
-		groupIndex++;
-	}
+    direction = m_experimentSequence[targetGroup].direction;
 
-	if (groupIndex < 0 || groupIndex >= static_cast<int>(m_experimentSequence.size())) {
-		return false;
-	}
-
-	const auto& group = m_experimentSequence[groupIndex];
-	if (group.trials.empty()) {
-		return false;
-	}
-
-	if (trialIndex < 0 || trialIndex >= static_cast<int>(group.trials.size())) {
-		return false;
-	}
-
-	direction = group.direction;
-	polarity = group.trials[trialIndex].polarity;
-	return true;
+    if (!m_hasPendingTrialConfig || m_pendingGroupIdx != targetGroup) {
+        randomizeNextTrialConfig(targetGroup, m_pendingPolarity, m_pendingReferenceOnLeft);
+    }
+    polarity = m_pendingPolarity;
+    return true;
 }
 
 // ?? recordUserChoice ??
@@ -1069,62 +1270,72 @@ void UserStudyManager::recordUserChoice(int choice)
         return;
     }
 
+    StaircaseState postState = getCurrentStaircaseState();
+
     m_currentTrial.choiceTime = std::chrono::steady_clock::now();
     m_currentTrial.userChoice = choice;
 
     m_currentTrial.reactionTime =
         std::chrono::duration<double>(m_currentTrial.choiceTime - m_currentTrial.trialStartTime).count();
 
+    m_currentTrial.correctChoice = m_currentReferenceOnLeft ? 1 : 0;
+    m_currentTrial.isCorrect = (choice == m_currentTrial.correctChoice);
+
+    ensureExp1GroupProgressSize();
+    if (m_currentTrialGroup >= 0 && m_currentTrialGroup < static_cast<int>(m_staircases.size())) {
+        AdaptiveStaircase& staircase = m_staircases[m_currentTrialGroup];
+        staircase.update(m_currentTrial.isCorrect);
+        postState = staircase.getState();
+        if (m_currentTrialGroup < static_cast<int>(m_groupProgress.size())) {
+            m_groupProgress[m_currentTrialGroup] = postState.trialCount;
+        }
+        m_currentTrialInGroup = postState.trialCount;
+    }
+
     m_results.push_back(m_currentTrial);
     m_trialActive = false;
 
-    // ????CSV??
     if (m_csvFileReady) {
         writeTrialToCSV(m_currentTrial);
     }
 
     std::cout << "[UserStudy] Choice recorded: " << (choice == 0 ? "Left" : "Right")
+        << " | Correct choice: " << (m_currentTrial.correctChoice == 0 ? "Left" : "Right")
+        << " | IsCorrect: " << (m_currentTrial.isCorrect ? "Yes" : "No")
         << " | Reaction Time: " << std::fixed << std::setprecision(3)
         << m_currentTrial.reactionTime << "s" << std::endl;
 
-    // ????
-    m_currentTrialInGroup++;
-    ensureExp1GroupProgressSize();
-    if (m_currentTrialGroup >= 0 && m_currentTrialGroup < static_cast<int>(m_groupProgress.size())) {
-        if (m_currentTrialInGroup > m_groupProgress[m_currentTrialGroup]) {
-            m_groupProgress[m_currentTrialGroup] = m_currentTrialInGroup;
-        }
-    }
-
-    // ????
-    if (m_currentTrialInGroup >= 110) {
-        if (m_currentTrialGroup >= 0 && m_currentTrialGroup < static_cast<int>(m_groupProgress.size())) {
-            m_groupProgress[m_currentTrialGroup] = 110;
-        }
+    if (isGroupIndexComplete(m_currentTrialGroup)) {
         m_experimentState = ExperimentState::GROUP_COMPLETE;
         std::cout << "\n[UserStudy] >>> GROUP " << (m_currentTrialGroup + 1)
-            << " COMPLETE! <<<" << std::endl;
-
-        if (m_currentTrialGroup + 1 < 6) {
-            std::cout << "Take a 5-minute break before continuing." << std::endl;
-            std::cout << "Press 'T' when ready to start next group." << std::endl;
-        }
-        else {
+            << " COMPLETE (reversals " << postState.reversalCount
+            << "/" << m_targetReversals << ") <<<" << std::endl;
+        int nextGroup = findNextExp1GroupWithRemaining(m_currentTrialGroup + 1);
+        if (nextGroup < 0) {
             m_experimentState = ExperimentState::EXPERIMENT_COMPLETE;
             std::cout << "\n*** EXPERIMENT COMPLETE! ***" << std::endl;
             std::cout << "Thank you for your participation!" << std::endl;
             saveResults("user_" + m_userId + "_final_results.csv");
         }
+        else {
+            m_currentTrialGroup = nextGroup;
+            m_currentMode = m_experimentSequence[m_currentTrialGroup].mode;
+            m_currentDirection = m_experimentSequence[m_currentTrialGroup].direction;
+            m_currentStaircaseId = selectStaircaseId(m_currentTrialGroup);
+            m_currentPolarity = SurfacePolarity::POSITIVE;
+            if (m_currentTrialGroup < static_cast<int>(m_groupProgress.size())) {
+                m_currentTrialInGroup = m_groupProgress[m_currentTrialGroup];
+            }
+            else {
+                m_currentTrialInGroup = getStaircaseStateForGroup(m_currentTrialGroup).trialCount;
+            }
+            m_hasPendingTrialConfig = false;
+            m_pendingGroupIdx = -1;
+            std::cout << "Press 'T' when ready to continue to the next group." << std::endl;
+        }
     }
     else {
         m_experimentState = ExperimentState::TRIAL_COMPLETE;
-
-        // ?55???????
-        if (m_currentTrialInGroup == 55) {
-            std::cout << "\n*** 2-MINUTE BREAK TIME ***" << std::endl;
-            std::cout << "You've completed 55 trials. Please rest for 2 minutes." << std::endl;
-        }
-
         std::cout << "Press 'T' for next trial." << std::endl;
     }
 
@@ -1135,7 +1346,7 @@ void UserStudyManager::recordUserChoice(int choice)
 // ????????...
 double UserStudyManager::getCurrentReferenceStiffness() const
 {
-    return m_currentTrial.referenceStiffness;
+    return m_referenceStiffness;
 }
 
 double UserStudyManager::getCurrentComparisonStiffness() const
@@ -1151,23 +1362,37 @@ void UserStudyManager::saveResults(const std::string& fn)
         return;
     }
 
-    file << "TrialNumber,Mode,Direction,ReferenceStiffness,ComparisonStiffness,"
-        << "UserChoice,ReactionTime,Polarity\n";
+    file << "TrialNumber,GroupIndex,TrialInGroup,Mode,Direction,ReferenceStiffness,ComparisonStiffness,"
+        << "ReferenceOnLeft,CorrectChoice,IsCorrect,UserChoice,ReactionTime,Polarity,"
+        << "StaircaseKComp,StaircaseDeltaK,StaircaseStep,StaircaseReversals,StaircaseTrialInGroup,StaircaseId\n";
 
     for (const auto& r : m_results) {
-        // ??????????
-        int groupIdx = r.trialNumber / 110;
-        if (groupIdx < m_experimentSequence.size()) {
-            const auto& group = m_experimentSequence[groupIdx];
-            file << r.trialNumber << ','
-                << (int)group.mode << ','
-                << (int)group.direction << ','
-                << r.referenceStiffness << ','
-                << r.comparisonStiffness << ','
-                << r.userChoice << ','
-                << r.reactionTime << ','
-                << polarityToString(r.polarity) << '\n';
+        int groupIdx = r.groupIndex;
+        int modeVal = 0;
+        int dirVal = 0;
+        if (groupIdx >= 0 && groupIdx < static_cast<int>(m_experimentSequence.size())) {
+            modeVal = static_cast<int>(m_experimentSequence[groupIdx].mode);
+            dirVal = static_cast<int>(m_experimentSequence[groupIdx].direction);
         }
+        file << (r.trialNumber + 1) << ','
+            << (groupIdx + 1) << ','
+            << r.staircaseTrialInGroup << ','
+            << modeVal << ','
+            << dirVal << ','
+            << r.referenceStiffness << ','
+            << r.comparisonStiffness << ','
+            << (r.referenceOnLeft ? 1 : 0) << ','
+            << r.correctChoice << ','
+            << (r.isCorrect ? 1 : 0) << ','
+            << r.userChoice << ','
+            << r.reactionTime << ','
+            << polarityToString(r.polarity) << ','
+            << r.comparisonStiffness << ','
+            << r.staircaseDeltaK << ','
+            << r.staircaseStep << ','
+            << r.staircaseReversals << ','
+            << r.staircaseTrialInGroup << ','
+            << r.staircaseId << '\n';
     }
 
     std::cout << "[UserStudy] Saved " << m_results.size() << " trials -> " << fn << std::endl;
@@ -1180,10 +1405,18 @@ void UserStudyManager::setManualTrialGroup(InteractionMode m, FeedbackDirection 
         if (m_experimentSequence[i].mode == m &&
             m_experimentSequence[i].direction == d) {
             m_currentTrialGroup = i;
+            StaircaseState st = getStaircaseStateForGroup(static_cast<int>(i));
             ensureExp1GroupProgressSize();
-            m_currentTrialInGroup = (i < m_groupProgress.size()) ? m_groupProgress[i] : 0;
+            if (i < m_groupProgress.size()) {
+                m_groupProgress[i] = st.trialCount;
+            }
+            m_currentTrialInGroup = st.trialCount;
             m_currentMode = m;
             m_currentDirection = d;
+            m_currentStaircaseId = selectStaircaseId(static_cast<int>(i));
+            m_experimentState = isGroupIndexComplete(static_cast<int>(i)) ? ExperimentState::GROUP_COMPLETE : ExperimentState::READY;
+            m_hasPendingTrialConfig = false;
+            m_pendingGroupIdx = -1;
             std::cout << "[UserStudy] Manual jump to Group " << i
                 << " Mode:" << (int)m << " Dir:" << (int)d << std::endl;
             saveProgress();
@@ -1200,6 +1433,24 @@ void UserStudyManager::resetCurrentGroup()
     if (m_currentTrialGroup >= 0 && m_currentTrialGroup < static_cast<int>(m_groupProgress.size())) {
         m_groupProgress[m_currentTrialGroup] = 0;
     }
+    double minK = std::max(m_minKComp, m_referenceStiffness);
+    double maxK = std::max(minK, m_maxKComp);
+    double startK = std::min(std::max(m_startKComp, minK), maxK);
+    if (m_currentTrialGroup >= 0 && m_currentTrialGroup < static_cast<int>(m_staircases.size())) {
+        m_staircases[m_currentTrialGroup] = AdaptiveStaircase(
+            m_referenceStiffness,
+            startK,
+            minK,
+            maxK,
+            m_startStep,
+            m_fineStep,
+            m_switchAfterReversals,
+            m_targetReversals);
+    }
+    m_hasPendingTrialConfig = false;
+    m_pendingGroupIdx = -1;
+    m_experimentState = ExperimentState::READY;
+    syncGroupProgressFromStaircases();
     saveProgress();
     std::cout << "[UserStudy] Group reset.\n";
 }
@@ -1221,20 +1472,26 @@ void UserStudyManager::sanitizeProgressIndices()
         m_currentTrialInGroup = 0;
     }
 
-    const auto& group = m_experimentSequence[m_currentTrialGroup];
-    const int trialsInGroup = static_cast<int>(group.trials.size());
-    if (trialsInGroup == 0) {
-        std::cout << "[UserStudy] WARNING: Group " << m_currentTrialGroup
-            << " has no trials configured. Resetting trial index." << std::endl;
-        m_currentTrialInGroup = 0;
-        return;
-    }
+    int trialsInGroup = (m_currentTrialGroup < static_cast<int>(m_groupProgress.size()))
+        ? m_groupProgress[m_currentTrialGroup]
+        : 0;
+    if (trialsInGroup < 0) trialsInGroup = 0;
 
-    if (m_currentTrialInGroup < 0 || m_currentTrialInGroup >= trialsInGroup) {
-        std::cout << "[UserStudy] WARNING: Invalid trial index " << m_currentTrialInGroup
-            << " for group " << m_currentTrialGroup << ". Resetting to 0." << std::endl;
-        m_currentTrialInGroup = 0;
+    if (m_currentTrialInGroup < 0 || m_currentTrialInGroup > trialsInGroup) {
+        if (m_currentTrialInGroup < 0) {
+            std::cout << "[UserStudy] WARNING: Invalid trial index " << m_currentTrialInGroup
+                << " for group " << m_currentTrialGroup << ". Resetting to 0." << std::endl;
+            m_currentTrialInGroup = 0;
+        }
+        else {
+            m_currentTrialInGroup = trialsInGroup;
+        }
     }
+}
+
+bool UserStudyManager::isGroupComplete() const
+{
+    return isGroupIndexComplete(m_currentTrialGroup);
 }
 
 void UserStudyManager::ensureExp1GroupProgressSize()
@@ -1244,12 +1501,8 @@ void UserStudyManager::ensureExp1GroupProgressSize()
     if (m_groupProgress.size() < groupCount) {
         m_groupProgress.resize(groupCount, 0);
     }
-    // clamp oversized entries
     for (size_t i = 0; i < groupCount; ++i) {
-        int maxTrials = (i < m_experimentSequence.size()) ? static_cast<int>(m_experimentSequence[i].trials.size()) : 110;
-        if (maxTrials < 0) maxTrials = 0;
         if (m_groupProgress[i] < 0) m_groupProgress[i] = 0;
-        if (m_groupProgress[i] > maxTrials) m_groupProgress[i] = maxTrials;
     }
 }
 
@@ -1296,18 +1549,14 @@ bool UserStudyManager::hasNextTrial()
         return false;
     }
 
-    if (m_experimentSequence.empty()) {
+    if (m_experimentSequence.empty() || m_staircases.size() < m_experimentSequence.size()) {
         return false;
     }
 
     sanitizeProgressIndices();
 
-    if (m_currentTrialGroup < 0 ||
-        m_currentTrialGroup >= static_cast<int>(m_experimentSequence.size())) {
-        return false;
-    }
-
-    return true;
+    int nextGroup = findNextExp1GroupWithRemaining(m_currentTrialGroup);
+    return nextGroup >= 0;
 }
 
 bool UserStudyManager::hasNextTrialExp2() const
@@ -1377,11 +1626,18 @@ void UserStudyManager::startNextTrialExp2()
     m_exp2CurrentTrial.targetInPlaneAngleDeg = cfg.inPlaneAngleDeg;
     m_exp2CurrentTrial.userPlaneRotationDeg = 0.0;
     m_exp2CurrentTrial.userInPlaneAngleDeg = 0.0;
+    m_exp2CurrentTrial.forceCueCount = 0;
     m_exp2CurrentTrial.trialStartTime = std::chrono::steady_clock::now();
     m_exp2TrialStart = m_exp2CurrentTrial.trialStartTime;
     m_exp2TrialActive = true;
     m_exp2State = ExperimentState::IN_PROGRESS;
     m_exp2NeedBreak = false;
+}
+
+void UserStudyManager::incrementExp2ForceCueCount()
+{
+    if (!m_exp2TrialActive) return;
+    ++m_exp2CurrentTrial.forceCueCount;
 }
 
 void UserStudyManager::recordExp2UserPose(double planeSpinDeg, double inPlaneAngleDeg, double durationSeconds)
@@ -1563,75 +1819,42 @@ int UserStudyManager::getExp2CompletedTrials() const
 int UserStudyManager::getExp1CompletedTrials() const
 {
     int total = 0;
-    size_t groupCount = m_groupProgress.size();
-    for (size_t i = 0; i < groupCount; ++i) {
-        int maxTrials = (i < m_experimentSequence.size()) ? static_cast<int>(m_experimentSequence[i].trials.size()) : 110;
-        total += std::min(maxTrials, m_groupProgress[i]);
+    for (const auto& stair : m_staircases) {
+        total += stair.getState().trialCount;
+    }
+    if (m_staircases.size() < m_groupProgress.size()) {
+        for (size_t i = m_staircases.size(); i < m_groupProgress.size(); ++i) {
+            if (m_groupProgress[i] > 0) {
+                total += m_groupProgress[i];
+            }
+        }
     }
     return total;
 }
 void UserStudyManager::createOrLoadUserCSV()
 {
     std::string csvFilename = getUserCSVFilename();
+    const std::string header = "TrialNumber,GroupIndex,TrialInGroup,Mode,Direction,ReferenceStiffness,ComparisonStiffness,ReferenceOnLeft,CorrectChoice,IsCorrect,UserChoice,ReactionTime,Polarity,StaircaseKComp,StaircaseDeltaK,StaircaseStep,StaircaseReversals,StaircaseTrialInGroup,StaircaseId";
 
-    std::cout << "[UserStudy] CSV filename: " << csvFilename << std::endl;
-
-    // ????????????
+    bool hasCorrectHeader = false;
     std::ifstream checkFile(csvFilename);
-    bool fileExists = false;
     if (checkFile.is_open()) {
-        checkFile.seekg(0, std::ios::end);
-        fileExists = (checkFile.tellg() > 0);
-        checkFile.close();
-        std::cout << "[UserStudy] File exists and has content: " << (fileExists ? "YES" : "NO") << std::endl;
-    }
-    else {
-        std::cout << "[UserStudy] File does not exist." << std::endl;
-    }
-
-    if (fileExists) {
-        std::cout << "[UserStudy] Found existing CSV file with content: " << csvFilename << std::endl;
-        std::cout << "[UserStudy] Will continue appending data to existing file." << std::endl;
-    }
-    else {
-        std::cout << "[UserStudy] Creating new CSV file: " << csvFilename << std::endl;
-
-        // ?????????????
-        std::ofstream newFile(csvFilename, std::ios::out);
-        if (newFile.is_open()) {
-            // ? ??:?????
-            std::string header = "TrialNumber,Mode,Direction,ReferenceStiffness,ComparisonStiffness,UserChoice,ReactionTime,Polarity";
-            newFile << header << std::endl;
-            newFile.flush();
-
-            std::cout << "[UserStudy] Header written to file." << std::endl;
-
-            newFile.close();
-
-            // ????
-            std::ifstream verifyFile(csvFilename);
-            if (verifyFile.is_open()) {
-                std::string firstLine;
-                std::getline(verifyFile, firstLine);
-                verifyFile.close();
-
-                if (firstLine.empty()) {
-                    std::cerr << "[UserStudy] ERROR: Header was not written!" << std::endl;
-                    m_csvFileReady = false;
-                    return;
-                }
-                else {
-                    std::cout << "[UserStudy] Verification successful. First line: " << firstLine << std::endl;
-                }
-            }
-
-            std::cout << "[UserStudy] CSV file created successfully." << std::endl;
+        std::string firstLine;
+        std::getline(checkFile, firstLine);
+        if (firstLine == header) {
+            hasCorrectHeader = true;
         }
-        else {
+    }
+
+    if (!hasCorrectHeader) {
+        std::ofstream newFile(csvFilename, std::ios::out | std::ios::trunc);
+        if (!newFile.is_open()) {
             std::cerr << "[UserStudy] ERROR: Could not create CSV file!" << std::endl;
             m_csvFileReady = false;
             return;
         }
+        newFile << header << std::endl;
+        newFile.close();
     }
 
     m_csvFileReady = true;
@@ -1647,26 +1870,37 @@ void UserStudyManager::writeTrialToCSV(const TrialResult& trial)
         return;
     }
 
-    // ????????????
-    int groupIdx = trial.trialNumber / 110;
-    if (groupIdx < m_experimentSequence.size()) {
-        const auto& group = m_experimentSequence[groupIdx];
-
-        // ? ??:???CSV?,??UserID?GroupNumber?TrialInGroup?Timestamp
-        csvFile << trial.trialNumber << ","
-            << (int)group.mode << ","
-            << (int)group.direction << ","
-            << std::fixed << std::setprecision(2) << trial.referenceStiffness << ","
-            << std::fixed << std::setprecision(2) << trial.comparisonStiffness << ","
-            << trial.userChoice << ","
-            << std::fixed << std::setprecision(4) << trial.reactionTime << ","
-            << polarityToString(trial.polarity) << std::endl;
-
-        csvFile.flush();
-        std::cout << "[UserStudy] Trial data written to CSV file." << std::endl;
+    int groupIdx = trial.groupIndex;
+    int modeVal = 0;
+    int dirVal = 0;
+    if (groupIdx >= 0 && groupIdx < static_cast<int>(m_experimentSequence.size())) {
+        modeVal = static_cast<int>(m_experimentSequence[groupIdx].mode);
+        dirVal = static_cast<int>(m_experimentSequence[groupIdx].direction);
     }
 
+    csvFile << (trial.trialNumber + 1) << ","
+        << (groupIdx + 1) << ","
+        << trial.staircaseTrialInGroup << ","
+        << modeVal << ","
+        << dirVal << ","
+        << std::fixed << std::setprecision(2) << trial.referenceStiffness << ","
+        << std::setprecision(2) << trial.comparisonStiffness << ","
+        << (trial.referenceOnLeft ? 1 : 0) << ","
+        << trial.correctChoice << ","
+        << (trial.isCorrect ? 1 : 0) << ","
+        << trial.userChoice << ","
+        << std::setprecision(4) << trial.reactionTime << ","
+        << polarityToString(trial.polarity) << ","
+        << std::setprecision(2) << trial.comparisonStiffness << ","
+        << std::setprecision(2) << trial.staircaseDeltaK << ","
+        << std::setprecision(2) << trial.staircaseStep << ","
+        << trial.staircaseReversals << ","
+        << trial.staircaseTrialInGroup << ","
+        << trial.staircaseId << std::endl;
+
+    csvFile.flush();
     csvFile.close();
+    std::cout << "[UserStudy] Trial data written to CSV file." << std::endl;
 }
 
 void UserStudyManager::createOrLoadUserCSVExp2()
@@ -1687,7 +1921,7 @@ void UserStudyManager::createOrLoadUserCSVExp2()
             m_exp2CsvFileReady = false;
             return;
         }
-        file << "TrialNumber,GroupIndex,TrialInGroup,Plane,TargetPlaneSpinDeg,TargetAngleDeg,UserPlaneSpinDeg,UserAngleDeg,DurationSeconds\n";
+        file << "TrialNumber,GroupIndex,TrialInGroup,Plane,TargetPlaneSpinDeg,TargetAngleDeg,UserPlaneSpinDeg,UserAngleDeg,DurationSeconds,ForceCueCount\n";
         file.close();
     }
 
@@ -1712,6 +1946,7 @@ void UserStudyManager::writeExp2TrialToCSV(const AngleTrialResult& trial)
         << trial.targetInPlaneAngleDeg << ","
         << trial.userPlaneRotationDeg << ","
         << trial.userInPlaneAngleDeg << ","
-        << std::fixed << std::setprecision(3) << trial.durationSeconds << "\n";
+        << std::fixed << std::setprecision(3) << trial.durationSeconds << ","
+        << trial.forceCueCount << "\n";
     file.close();
 }

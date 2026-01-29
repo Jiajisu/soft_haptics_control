@@ -3430,8 +3430,8 @@ if (experimentMode && userStudy && userStudy->isTrialActive()) {
 	double compStiffness = userStudy->getCurrentComparisonStiffness();
 
 	// ????????
-	static bool leftIsReference = (rand() % 2 == 0);
-	if (leftIsReference) {
+	bool referenceOnLeft = userStudy->getReferenceOnLeft();
+	if (referenceOnLeft) {
 		leftCube->m_material->setStiffness(refStiffness);
 		rightCube->m_material->setStiffness(compStiffness);
 	}
@@ -3919,6 +3919,7 @@ void updateExperimentLabels()
 	}
 	SurfacePolarity pol = userStudy->getCurrentPolarity();
 	std::string polStr = (pol == SurfacePolarity::POSITIVE) ? "+ axis" : "- axis";
+	int targetReversals = userStudy->getTargetReversals();
 
 	// ??????
 	if (labelExperimentInstructions) {
@@ -3939,6 +3940,7 @@ void updateExperimentLabels()
 		case ExperimentState::IN_PROGRESS:
 			instructions += "Trial in progress\n";
 			instructions += "Touch only the red-highlighted face (" + polStr + ", along " + dirStr + ")\n";
+			instructions += "Reference may appear on either side each trial.\n";
 			instructions += "Press '1' for LEFT surface stiffer, '2' for RIGHT surface stiffer\n";
 			break;
 
@@ -3948,8 +3950,8 @@ void updateExperimentLabels()
 			break;
 
 		case ExperimentState::GROUP_COMPLETE:
-			instructions += "Group complete! Take a 5-minute break.\n";
-			instructions += "Press 'T' when ready to continue\n";
+			instructions += "Group complete! Staircase finished for this condition.\n";
+			instructions += "Press 'T' when ready to continue to the next group\n";
 			break;
 
 		case ExperimentState::EXPERIMENT_COMPLETE:
@@ -3959,6 +3961,7 @@ void updateExperimentLabels()
 			break;
 		}
 
+		instructions += "\nStaircase stops after " + std::to_string(targetReversals) + " reversals per group.\n";
 		instructions += "\nSurface orientation: " + polStr + "\n";
 		instructions += "Contact only the red-highlighted surface shifted along " + dirStr + "\n";
 		instructions += "\nManual Mode: Press 5-9,0 to jump to specific groups";
@@ -3974,17 +3977,24 @@ void updateExperimentLabels()
 
 	// ????????
 	if (labelTrialInfo && userStudy->hasNextTrial()) {
-		int trialInGroup = userStudy->getCurrentTrialInGroup();
+		int completedInGroup = userStudy->getCurrentTrialInGroup();
+		int trialInGroup = completedInGroup + 1;
 		int groupNum = userStudy->getCurrentTrialGroup() + 1;
+		StaircaseState stair = userStudy->getCurrentStaircaseState();
 
-		std::string trialInfo = "Group: " + std::to_string(groupNum) + "/6 | ";
-		trialInfo += "Trial: " + std::to_string(trialInGroup) + "/110\n";
+		std::ostringstream trialInfo;
+		trialInfo << "Group: " << groupNum << "/6 | "
+			<< "Trial: " << trialInGroup
+			<< " | Reversals: " << stair.reversalCount << "/" << targetReversals << "\n";
 
 		std::string modeStr = (userStudy->getCurrentMode() == InteractionMode::FORCE_TO_POSITION) ? "F-P" : "F-F";
 
-		trialInfo += "Mode: " + modeStr + " | Direction: " + dirStr + " | Surface: " + polStr;
+		trialInfo << "Mode: " << modeStr << " | Direction: " << dirStr << " | Surface: " << polStr;
+		trialInfo << "\nDeltaK: " << std::fixed << std::setprecision(1)
+			<< (stair.currentKComp - userStudy->getReferenceStiffness())
+			<< " | Step: " << stair.currentStep;
 
-		labelTrialInfo->setText(trialInfo);
+		labelTrialInfo->setText(trialInfo.str());
 		labelTrialInfo->m_fontColor.setBlack();
 
 		int labelWidth = labelTrialInfo->getWidth();
