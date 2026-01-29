@@ -81,7 +81,7 @@ cMatrix3d g_exp2UserPlaneBaseRot;
 cMatrix3d g_exp2TargetPlaneBaseRot;
 cMatrix3d g_exp2PlaneInitialRot;
 cVector3d g_exp2ForceDirWorld(1.0, 0.0, 0.0);
-double g_exp2ForceDisplayMagnitudeMM = 15.0;
+double g_exp2ForceDisplayMagnitudeMM = 5;
 double g_exp2UserPlaneSpinDeg = 0.0;
 double g_exp2TargetPlaneSpinDeg = 0.0;
 cMesh* leftCubeHighlight = nullptr;
@@ -215,11 +215,47 @@ const double kExp2LineLift = kExp2PlaneThickness * 0.6;
 const double kExp2AngleStepDeg = 10.0;
 const double kExp2PlaneRadius = kExp2LineLength;
 const cVector3d kExp2PlaneCenter(0.0, 0.0, 0.0);
+const cVector3d kExp1AxisOrigin(-0.09, -0.09, 0.0);
 double g_exp2UserAngleDeg = 0.0;
 double g_exp2TargetAngleDeg = 0.0;
 int g_exp2ActiveTrialNumber = -1;
 bool g_exp2DebugMode = false;
 std::chrono::steady_clock::time_point g_exp2TrialStartTime;
+constexpr auto kExp2ForcePulseDuration = std::chrono::milliseconds(2000);
+using SteadyTick = std::chrono::steady_clock::duration::rep;
+std::atomic<bool> g_exp2ForcePulseActive{ false };
+std::atomic<SteadyTick> g_exp2ForcePulseDeadlineTicks{ 0 };
+std::atomic<bool> g_exp2PendingNextTrialAfterForce{ false };
+
+void stopExp2ForcePulse()
+{
+	g_exp2ForcePulseActive.store(false, std::memory_order_release);
+	g_exp2ForcePulseDeadlineTicks.store(0, std::memory_order_relaxed);
+}
+
+bool updateExp2ForcePulseActive()
+{
+	if (!g_exp2ForcePulseActive.load(std::memory_order_acquire)) {
+		return false;
+	}
+	const SteadyTick deadlineTicks = g_exp2ForcePulseDeadlineTicks.load(std::memory_order_acquire);
+	if (deadlineTicks == 0) {
+		return g_exp2ForcePulseActive.load(std::memory_order_relaxed);
+	}
+	const SteadyTick nowTicks = std::chrono::steady_clock::now().time_since_epoch().count();
+	if (nowTicks >= deadlineTicks) {
+		stopExp2ForcePulse();
+		return false;
+	}
+	return true;
+}
+
+void startExp2ForcePulse()
+{
+	const auto endTime = std::chrono::steady_clock::now() + kExp2ForcePulseDuration;
+	g_exp2ForcePulseDeadlineTicks.store(endTime.time_since_epoch().count(), std::memory_order_release);
+	g_exp2ForcePulseActive.store(true, std::memory_order_release);
+}
 void updateExperimentLabels();
 void updateSurfaceOrientation(FeedbackDirection direction);
 void applySurfacePolarity(SurfacePolarity polarity);
@@ -394,6 +430,16 @@ void showExperiment2Objects(bool show)
 	processPendingExp2AngleLocked();
 }
 
+void positionAxesAt(const cVector3d& origin)
+{
+	std::lock_guard<std::mutex> lock(g_sceneMutex);
+	const cVector3d delta = origin - kExp1AxisOrigin;
+
+	if (axisX) axisX->setLocalPos(delta);
+	if (axisY) axisY->setLocalPos(delta);
+	if (axisZ) axisZ->setLocalPos(delta);
+}
+
 void applyExp2UserAngle()
 {
 	// Apply user angle relative to the initial plane orientation
@@ -440,8 +486,50 @@ void updateExp2ForceLineLocked()
 {
 	if (!g_exp2ForceLine) return;
 	cVector3d planeCenter = (g_exp2Plane) ? g_exp2Plane->getLocalPos() : kExp2PlaneCenter;
+
 	cVector3d normal = g_exp2TargetPlaneBaseRot * cVector3d(0.0, 0.0, 1.0);
-	applyExp2RotationToMesh(g_exp2ForceLine, g_exp2TargetPlaneBaseRot, g_exp2TargetAngleDeg);
+	if (normal.lengthsq() < 1e-12) {
+		normal.set(0.0, 0.0, 1.0);
+	}
+	normal.normalize();
+
+	cVector3d dir = g_exp2ForceDirWorld;
+	if (dir.lengthsq() < 1e-9) {
+		// Fallback to target orientation when no force direction is available yet.
+		cMatrix3d tmp = g_exp2TargetPlaneBaseRot;
+		tmp.rotateAboutGlobalAxisRad(normal, cDegToRad(g_exp2TargetAngleDeg));
+		dir = tmp * cVector3d(1.0, 0.0, 0.0);
+	}
+	double dirLen = dir.length();
+	if (dirLen < 1e-9) {
+		dir.set(1.0, 0.0, 0.0);
+		dirLen = 1.0;
+	}
+	dir /= dirLen;
+
+	// Build a rotation that aligns +X with the force direction. The around-axis
+	// orientation is not important for a line, but handle the 180-deg case.
+	cMatrix3d rot;
+	cVector3d baseX(1.0, 0.0, 0.0);
+	cVector3d axis = cCross(baseX, dir);
+	const double axisLen = axis.length();
+	if (axisLen < 1e-6) {
+		if (baseX.dot(dir) < 0.0) {
+			rot.setAxisAngleRotationDeg(cVector3d(0.0, 0.0, 1.0), 180.0);
+		}
+		else {
+			rot.identity();
+		}
+	}
+	else {
+		axis /= axisLen;
+		double dotVal = baseX.dot(dir);
+		if (dotVal > 1.0) dotVal = 1.0;
+		if (dotVal < -1.0) dotVal = -1.0;
+		const double angleRad = std::acos(dotVal);
+		rot.setAxisAngleRotationRad(axis, angleRad);
+	}
+	g_exp2ForceLine->setLocalRot(rot);
 	g_exp2ForceLine->setLocalPos(planeCenter + normal * kExp2LineLift);
 }
 
@@ -458,6 +546,9 @@ bool startNextExp2Trial()
 		updateExperiment2Labels("Experiment 2 complete.");
 		return false;
 	}
+
+	stopExp2ForcePulse();
+	g_exp2PendingNextTrialAfterForce.store(false, std::memory_order_release);
 
 	userStudy->startNextTrialExp2();
 	g_exp2TargetAngleDeg = userStudy->getExp2TargetAngleDeg();
@@ -476,6 +567,12 @@ bool startNextExp2Trial()
 		g_exp2UserPlaneBaseRot.rotateAboutGlobalAxisDeg(cVector3d(0.0, 0.0, 1.0), g_exp2UserPlaneSpinDeg);
 		g_exp2TargetPlaneBaseRot = g_exp2PlaneInitialRot;
 		g_exp2TargetPlaneBaseRot.rotateAboutGlobalAxisDeg(cVector3d(0.0, 0.0, 1.0), g_exp2TargetPlaneSpinDeg);
+		{
+			cMatrix3d forceRot = g_exp2TargetPlaneBaseRot;
+			const cVector3d targetNormal = g_exp2TargetPlaneBaseRot * cVector3d(0.0, 0.0, 1.0);
+			forceRot.rotateAboutGlobalAxisRad(targetNormal, cDegToRad(g_exp2TargetAngleDeg));
+			g_exp2ForceDirWorld = forceRot * cVector3d(1.0, 0.0, 0.0);
+		}
 		if (g_exp2Plane) {
 			g_exp2Plane->setLocalRot(g_exp2UserPlaneBaseRot);
 		}
@@ -491,8 +588,31 @@ bool startNextExp2Trial()
 	applyExp2UserAngle();
 	flushPendingExp2Angle();
 	showExperiment2Objects(true);
-	updateExperiment2Labels("New trial started. Adjust line then press SPACE.");
+	updateExperiment2Labels("New trial started. Press 'F' for a 2s force cue, adjust line, then press SPACE.");
 	return true;
+}
+
+void processExp2PendingTrialAfterForce()
+{
+	if (g_activeExperiment != ExperimentType::EXPERIMENT2) return;
+	if (!userStudy) return;
+
+	const bool forceActive = updateExp2ForcePulseActive();
+	if (forceActive) return;
+
+	if (!g_exp2PendingNextTrialAfterForce.load(std::memory_order_acquire)) {
+		return;
+	}
+
+	if (userStudy->isExp2TrialActive()) {
+		// Wait for the current trial to finish before starting the queued one.
+		return;
+	}
+
+	g_exp2PendingNextTrialAfterForce.store(false, std::memory_order_release);
+	if (!startNextExp2Trial()) {
+		updateExperiment2Labels("No remaining trials.");
+	}
 }
 
 void updateExperiment2Labels(const std::string& status)
@@ -510,12 +630,9 @@ void updateExperiment2Labels(const std::string& status)
 		oss << "ANGLE MATCHING EXPERIMENT (single plane + line)\n";
 		oss << "Controls: Left/Right adjust line angle (" << kExp2AngleStepDeg << " deg step)";
 		if (sizeCombo > 0) {
-			oss << "; Up/Down rotate plane about Z in combined group\n";
+			oss << "; Up/Down rotate plane about Z in combined group";
 		}
-		else {
-			oss << "\n";
-		}
-		oss << "Press SPACE to confirm, 'T' for next trial, 'R' to exit, 'E' for Experiment 1.\n";
+		oss << "; F plays 2s force cue (replayable); SPACE confirm; T next trial; R exit; E for Experiment 1.\n";
 		oss << "Manual groups: 5=X-plane(" << sizeX << "), 6=Y-plane(" << sizeY << "), 7=Z-plane(" << sizeZ << ")";
 		if (sizeCombo > 0) {
 			oss << ", 8=Combined(" << sizeCombo << ")";
@@ -532,7 +649,7 @@ void updateExperiment2Labels(const std::string& status)
 			oss << "Press 'T' to start the next trial.\n";
 			break;
 		case ExperimentState::IN_PROGRESS:
-			oss << "Trial running: rotate the line on the plane to match the target direction, then press SPACE.\n";
+			oss << "Trial running: press 'F' to play a 2s force cue, rotate the line to match the target, then press SPACE.\n";
 			break;
 		case ExperimentState::TRIAL_COMPLETE:
 			if (userStudy->isExp2BreakPending()) {
@@ -670,10 +787,13 @@ void activateExperimentMode(ExperimentType type)
 
 	deactivateCurrentExperimentObjects();
 	showOriginalObjects(false);
+	stopExp2ForcePulse();
+	g_exp2PendingNextTrialAfterForce.store(false, std::memory_order_release);
 
 	if (type == ExperimentType::EXPERIMENT1) {
 		// Hide Experiment 2 meshes first so shared objects (base) stay enabled for Exp1
 		showExperiment2Objects(false);
+		positionAxesAt(kExp1AxisOrigin);
 		showExperimentObjects(true);
 		experimentMode = true;
 		g_activeExperiment = ExperimentType::EXPERIMENT1;
@@ -687,6 +807,7 @@ void activateExperimentMode(ExperimentType type)
 	}
 	else if (type == ExperimentType::EXPERIMENT2) {
 		showExperimentObjects(false);
+		positionAxesAt(kExp2PlaneCenter);
 		g_exp2DebugMode = false;
 		showExperiment2Objects(true);
 		experimentMode = false;
@@ -710,7 +831,10 @@ void exitExperimentMode()
 	if (g_activeExperiment == ExperimentType::NONE) return;
 
 	g_exp2DebugMode = false;
+	stopExp2ForcePulse();
+	g_exp2PendingNextTrialAfterForce.store(false, std::memory_order_release);
 	deactivateCurrentExperimentObjects();
+	positionAxesAt(kExp1AxisOrigin);
 	showOriginalObjects(true);
 	if (labelExperimentInstructions) labelExperimentInstructions->setEnabled(false);
 	if (labelTrialInfo) labelTrialInfo->setEnabled(false);
@@ -1926,6 +2050,18 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 		cout << "> Saved screenshot of shadowmap to file.       \r";
 	}
 
+	// option - play force cue for Experiment 2
+	else if (g_activeExperiment == ExperimentType::EXPERIMENT2 && a_key == GLFW_KEY_F)
+	{
+		if (userStudy && userStudy->isExp2TrialActive()) {
+			startExp2ForcePulse();
+			updateExperiment2Labels("Force cue playing for 2 seconds.");
+		}
+		else {
+			updateExperiment2Labels("Start a trial with 'T' before playing the force cue.");
+		}
+	}
+
 	// option - toggle fullscreen
 	else if (a_key == GLFW_KEY_F)
 	{
@@ -2040,6 +2176,7 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 	}
 	else if (g_activeExperiment == ExperimentType::EXPERIMENT2 && a_key == GLFW_KEY_SPACE)
 	{
+		stopExp2ForcePulse();
 		if (userStudy && userStudy->isExp2TrialActive()) {
 			double duration = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_exp2TrialStartTime).count();
 			userStudy->recordExp2UserPose(g_exp2UserPlaneSpinDeg, g_exp2UserAngleDeg, duration);
@@ -2055,6 +2192,12 @@ void keyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, 
 	}
 	else if (g_activeExperiment == ExperimentType::EXPERIMENT2 && a_key == GLFW_KEY_T)
 	{
+		if (updateExp2ForcePulseActive()) {
+			g_exp2PendingNextTrialAfterForce.store(true, std::memory_order_release);
+			updateExperiment2Labels("Force cue playing. Next trial will start after it ends.");
+			return;
+		}
+
 		if (userStudy && userStudy->isExp2TrialActive()) {
 			updateExperiment2Labels("Finish the current trial (press SPACE) before starting the next.");
 		}
@@ -2771,6 +2914,7 @@ void updateGraphics(void)
 	/////////////////////////////////////////////////////////////////////
 	// UPDATE WIDGETS
 	/////////////////////////////////////////////////////////////////////
+	processExp2PendingTrialAfterForce();
 
 	// update haptic and graphic rate data
 	labelRates->setText(cStr(freqCounterGraphics.getFrequency(), 0) + " Hz / " +
@@ -3353,6 +3497,7 @@ if (experimentMode && userStudy && userStudy->isTrialActive()) {
 else if (g_activeExperiment == ExperimentType::EXPERIMENT2 &&
 	userStudy && userStudy->isExp2TrialActive()) {
 	// Exp2: display a fixed-direction force along the target line direction on the active plane.
+	const bool forcePulseActive = updateExp2ForcePulseActive();
 	if (!hasInitPress) {
 		presCurr = ResolvedRateControl.m_initPressure;
 		hasInitPress = true;
@@ -3370,9 +3515,31 @@ else if (g_activeExperiment == ExperimentType::EXPERIMENT2 &&
 	rot.rotateAboutGlobalAxisRad(normal, cDegToRad(g_exp2TargetAngleDeg));
 	cVector3d dir = rot * cVector3d(1.0, 0.0, 0.0);
 	g_exp2ForceDirWorld = dir;
+	if (!forcePulseActive) {
+		dir.set(0.0, 0.0, 0.0);
+	}
+
+	if (g_exp2DebugMode) {
+		updateExp2ForceLine();
+	}
 
 	// Convert to a target tip position (mm) in the haptic controller frame.
-	cVector3d targetPosMM_rotated = dir * g_exp2ForceDisplayMagnitudeMM;
+	static cVector3d baseTipPosition(0.0, 0.0, ResolvedRateControl.h_0 * 0.001);
+	cVector3d targetTipPosition = baseTipPosition + dir * (g_exp2ForceDisplayMagnitudeMM * 0.001);
+
+	cVector3d targetPosMM = targetTipPosition * 1000.0;
+	targetPosMM.set(
+		-targetPosMM.x() + 0.0001,
+		targetPosMM.y(),
+		targetPosMM.z()
+	);
+	static const double angle = 210.0 * M_PI / 180.0;
+	static cMatrix3d rotZ_120(
+		cos(angle), -sin(angle), 0.0,
+		sin(angle), cos(angle), 0.0,
+		0.0, 0.0, 1.0
+	);
+	cVector3d targetPosMM_rotated = rotZ_120 * targetPosMM;
 
 	auto result = ResolvedRateControl.updateMotion(presCurr, targetPosMM_rotated);
 	chai3d::cVector3d newPos = result[0];

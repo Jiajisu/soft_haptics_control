@@ -31,9 +31,10 @@ constexpr int kExp2Repetitions = 5;
 // Combined-angle pairs [A,B] where A = plane rotation about Z, B = in-plane angle
 using Exp2AnglePair = std::array<double, 2>;
 const std::vector<Exp2AnglePair> kExp2CombinedAnglesDeg = {
-    {30.0, 30.0},
-    {60.0, 60.0},
-    {60.0, 30.0},
+    {30.0, 30.0}, {30.0, 60.0}, {30.0, 120.0}, {30.0, 150.0},
+    {60.0, 30.0}, {60.0, 60.0}, {60.0, 120.0}, {60.0, 150.0},
+    {120.0, 30.0}, {120.0, 60.0}, {120.0, 120.0}, {120.0, 150.0},
+    {150.0, 30.0}, {150.0, 60.0}, {150.0, 120.0}, {150.0, 150.0},
 };
 constexpr int kExp2CombinedRepetitions = 5;
 
