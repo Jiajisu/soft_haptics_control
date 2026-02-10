@@ -7,11 +7,6 @@ This project integrates:
 - **MicronTracker (MT)** 6-DoF optical tracking (base-referenced calibration + rigid-body transforms)
 - **Two psychophysics experiments** with robust session persistence and automatic CSV logging
 
-> Target audience: recruiters/HR (system-level highlights) + engineers (how to build/run/extend).
-
----
-
-## Why this project matters (Recruiter-friendly highlights)
 
 ### ✅ System-level engineering (end-to-end)
 - Built a **full stack** from device I/O → real-time tracking → control → experiment logic → data logging.
@@ -36,9 +31,8 @@ This project integrates:
 
 ## Demo (recommended)
 Add your own media here:
-- `docs/demo.gif` (short screen + device clip)
-- `docs/setup.jpg` (hardware layout)
-- `docs/exp1_ui.png` / `docs/exp2_ui.png` (UI overlay)
+
+
 
 ---
 
@@ -75,7 +69,7 @@ Add your own media here:
 
 ---
 
-## Repository structure (key files)
+## Repository structure 
 
 - **`Soft_gripper.cpp`**
   - Main entry point, CHAI3D world/UI setup
@@ -197,7 +191,7 @@ Add your own media here:
 
 ---
 
-## Calibration & coordinate frames (what’s happening)
+## Calibration & coordinate frames 
 
 ### 1) Base reference (`I`)
 Defines a stable world reference by capturing the `base` marker pose and applying a fixed offset rotation.
@@ -326,7 +320,8 @@ In `Soft_gripper.cpp`, update:
 ---
 
 ## Citation / Contact
-If you use or extend this framework in academic work, please cite the associated papers (add your BibTeX here).
+If you use or extend this framework in academic work, please cite the associated papers
 
 Maintainer: **Jiaji Su**  
-Lab: ERIE Lab, Case Western Reserve University
+Supervisor: **Zonghe Chua**
+Lab: **ERIE Lab, Case Western Reserve University**
