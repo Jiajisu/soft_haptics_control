@@ -29,8 +29,8 @@ This project integrates:
 
 ---
 
-## Demo (recommended)
-Add your own media here:
+## Demo 
+
 
 
 
@@ -41,8 +41,8 @@ Add your own media here:
 ### Runtime components (high-level)
 ```
 ┌──────────────────────────┐
-│        CHAI3D World       │
-│  tool ↔ virtual objects   │
+│        CHAI3D World      │
+│  tool ↔ virtual objects  │
 └─────────────┬────────────┘
               │ force/interaction
               v
@@ -56,14 +56,14 @@ Add your own media here:
 ┌──────────────────────────┐
 │ Arduino (SerialPort)     │
 │ "p1,p2,p3\n"             │
-│ pressure safety clamp     │
+│ pressure safety clamp    │
 └──────────────────────────┘
               │
               v
 ┌──────────────────────────┐
 │ UserStudyManager         │
-│ Exp1 staircase + Exp2     │
-│ session persistence + CSV │
+│ Exp1 staircase + Exp2    │
+│ session persistence + CSV│
 └──────────────────────────┘
 ```
 
